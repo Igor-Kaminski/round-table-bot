@@ -7,7 +7,7 @@ import imagehash
 import pytesseract
 import re
 
-IMG_PATH = "TeamMatch.png"
+IMG_PATH = "1273658961.png"
 HASH_JSON = "champion_hashes.json"
 OUTPUT_JSON = "parsed_scoreboard2.json"
 
@@ -95,6 +95,17 @@ def load_player_whitelist(file_path: str) -> list:
     return data["players"]
 
 
+def load_map_whitelist(file_path: str) -> list:
+    """Load the map whitelist from a JSON file."""
+    if not os.path.exists(file_path):
+        raise FileNotFoundError(f"Map whitelist file not found: {file_path}")
+    with open(file_path, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    if "maps" not in data or not isinstance(data["maps"], list):
+        raise ValueError(f"Invalid map whitelist format in {file_path}")
+    return data["maps"]
+
+
 def levenshtein_distance(s1, s2):
     """Calculate the Levenshtein distance between two strings."""
     if len(s1) < len(s2):
@@ -144,6 +155,24 @@ def ocr_text(img, box, whitelist, unmatched_players):
         return text
 
 
+def match_map_name(ocr_result: str, map_whitelist: list) -> str:
+    """Match the OCR result for a map name with the whitelist using Levenshtein distance."""
+    closest_match = None
+    min_distance = float("inf")
+    for map_name in map_whitelist:
+        distance = levenshtein_distance(ocr_result, map_name)
+        if distance < min_distance:
+            closest_match = map_name
+            min_distance = distance
+
+    if closest_match:
+        return closest_match
+    else:
+        print(
+            f"⚠ Error: '{ocr_result}' not found in map whitelist. Using raw value.")
+        return ocr_result
+
+
 def to_int(val: str) -> int:
     val = val.replace(",", "").strip()
     return int(val) if val.isdigit() else 0
@@ -158,6 +187,9 @@ def parse_kda(kda_str: str):
 
 def parse_match_data(img):
     match_data = {}
+    map_whitelist_file = "maps.json"  # Path to the maps.json file
+    map_whitelist = load_map_whitelist(map_whitelist_file)
+
     for key, (x1, y1, x2, y2) in MATCH_BOXES.items():
         box = (x1 + MATCH_X_SHIFT, y1 + MATCH_Y_SHIFT,
                x2 + MATCH_X_SHIFT, y2 + MATCH_Y_SHIFT)
@@ -173,6 +205,9 @@ def parse_match_data(img):
             # Extract the last integer from the text to get match score
             match = re.search(r"(\d+)$", text)
             match_data[key] = int(match.group(1)) if match else 0
+        elif key == "map":
+            # Match the OCR result with the map whitelist
+            match_data[key] = match_map_name(text, map_whitelist)
         else:
             match_data[key] = text
 
@@ -180,33 +215,21 @@ def parse_match_data(img):
 
 
 def main():
-    # Load the image first
     img = cv2.imread(IMG_PATH)
     if img is None:
         raise FileNotFoundError(f"Could not read image: {IMG_PATH}")
-    
-    # Load champion hashes
-    hash_book = load_hashes(HASH_JSON)
-    
-    # Load player whitelist
+    hashes = load_hashes(HASH_JSON)
+
+    # Extract match_id from the image file name
+    match_id = int(''.join(filter(str.isdigit, os.path.basename(IMG_PATH))))
+
+    # Load the player whitelist
     whitelist_file = "players.json"
     whitelist = load_player_whitelist(whitelist_file)
-    
-    # Extract match_id from filename - make it more robust
-    filename = os.path.basename(IMG_PATH)
-    digits = ''.join(filter(str.isdigit, filename))
-    
-    if digits:
-        match_id = int(digits)
-    else:
-        # If no digits in filename, generate a timestamp-based ID
-        import time
-        match_id = int(time.time())
-        print(f"⚠️ No match ID found in filename. Generated ID: {match_id}")
-    
-    # Now detect champion boxes
+
+    # Detect champions
     champ_boxes = detect_champion_boxes(img)
-    champs = [match_champion(img[y:y+h, x:x+w], hash_book)
+    champs = [match_champion(img[y:y+h, x:x+w], hashes)
               for (x, y, w, h) in champ_boxes]
 
     # Extract player stats
