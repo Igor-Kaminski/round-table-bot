@@ -581,6 +581,77 @@ async def winrate_with_against_cmd(ctx, discord_id1: str, discord_id2: str):
         f"Winrate AGAINST ({name1} vs {name2}): {against_winrate}% over {against_games} games"
     )
 
+@bot.command(name="ingest_text", help="Parse and insert a scoreboard from pasted text or a replied message. Execs only.")
+async def ingest_text_cmd(ctx, queue_num: str, *, scoreboard_text: str = None):
+    if not is_exec(ctx):
+        await ctx.send("You need the 'Executive' role to use this command!")
+        return
+    try:
+        # Try to gather scoreboard text from explicit arg or reply
+        text = scoreboard_text
+        if not text:
+            ref = getattr(ctx.message, "reference", None)
+            ref_msg = None
+            if ref and ref.resolved:
+                ref_msg = ref.resolved
+            elif ref and ref.message_id:
+                try:
+                    ref_msg = await ctx.channel.fetch_message(ref.message_id)
+                except Exception:
+                    ref_msg = None
+            if ref_msg:
+                if ref_msg.content:
+                    text = ref_msg.content
+                elif ref_msg.embeds:
+                    for embed in ref_msg.embeds:
+                        if embed.description:
+                            text = embed.description
+                            break
+
+        # Handle forgiving formats
+        raw_queue_str = queue_num.strip()
+        queue_is_digits = raw_queue_str.isdigit()
+        if "," in raw_queue_str or not queue_is_digits:
+            # User pasted header immediately after command; ensure header starts with match_id
+            # Prepend the token back to the text so parser sees full header
+            text = (raw_queue_str + (" " + text if text else "")).strip()
+            # Use match_id for queue unless an explicit numeric was supplied (it wasn't in this branch)
+            raw_queue_str = None
+
+        if not text:
+            await ctx.send("No scoreboard text provided. Paste it after the command or reply to a message containing it.")
+            return
+
+        cleaned_text = text.strip()
+        if cleaned_text.startswith("```"):
+            cleaned_text = re.sub(r"^```[a-zA-Z]*\n?", "", cleaned_text)
+            cleaned_text = cleaned_text.rstrip("`").rstrip()
+
+        match_data = parse_match_textbox(cleaned_text)
+        match_id = match_data["match_id"]
+
+        # Decide queue number: prefer explicit numeric arg; otherwise default to match_id
+        if raw_queue_str and raw_queue_str.isdigit():
+            queue_value = int(raw_queue_str)
+        else:
+            queue_value = int(match_id)
+
+        # Duplicate checks similar to modal flow
+        if match_exists(match_id):
+            await ctx.send(f"Match ID `{match_id}` already exists in the database.")
+            return
+        if queue_exists(queue_value):
+            await ctx.send(f"Queue number `{queue_value}` already exists in the database.")
+            return
+
+        insert_scoreboard(match_data, int(queue_value))
+        await ctx.send(f"Match `{match_id}` for queue `{queue_value}` successfully recorded.")
+    except ValueError as ve:
+        await ctx.send(f"Malformed match data: {ve}")
+    except Exception as e:
+        print(f"Error in ingest_text: {e}")
+        await ctx.send(f"Error processing match data: {e}")
+
 async def get_member(ctx, discord_id):
     guild = ctx.guild
     if guild is None:
