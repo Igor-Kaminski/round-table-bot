@@ -22,7 +22,6 @@ from db import (
     get_alt_igns,
     delete_alt_ign,
     get_player_id,
-    # NEW/UPDATED IMPORTS
     get_player_stats,
     get_top_champs,
     get_winrate_with_against,
@@ -45,7 +44,8 @@ bot = commands.Bot(command_prefix=["!"], intents=intents)
 GUILD_ID = int(os.getenv("GUILD_ID"))
 BOT_PERMISSION_ROLE_NAMES = ["Executive", "Bot Access"]
 BOT_PERMISSION_USER_IDS = [163861584379248651]  # Nick
-ALLOWED_CHANNels = ["match-results", "admin"]  # Define allowed channels
+# FIXED: Corrected the typo from ALLOWED_CHANNels to ALLOWED_CHANNELS
+ALLOWED_CHANNELS = ["match-results", "admin"]  # Define allowed channels
 
 
 @bot.event
@@ -69,8 +69,6 @@ def is_exec(ctx_or_message):
         return True
     return False
 
-
-# NEW: Reusable converter for parsing user arguments (me, @mention, ID)
 class PlayerConverter(commands.Converter):
     async def convert(self, ctx, argument):
         if argument.lower() == 'me':
@@ -78,7 +76,6 @@ class PlayerConverter(commands.Converter):
         try:
             return await commands.MemberConverter().convert(ctx, argument)
         except commands.MemberNotFound:
-            # Check if it's a numeric ID for a user not in the server
             if argument.isdigit():
                 try:
                     return await bot.fetch_user(int(argument))
@@ -105,7 +102,6 @@ async def query(ctx, *, sql_query: str):
         results = execute_select_query(sql_query)
         if results:
             formatted_results = "\n".join([str(row) for row in results])
-            # Handle long messages
             if len(formatted_results) > 1900:
                 await ctx.send("Query Results:", file=discord.File(io.StringIO(formatted_results), "results.txt"))
             else:
@@ -208,12 +204,9 @@ async def old_stats_cmd(ctx, discord_id: str):
     )
     await ctx.send(msg)
 
-
 @bot.command(name="ingest_text", help="Parse and insert a scoreboard from text. Execs only.")
 @commands.check(is_exec)
 async def ingest_text_cmd(ctx, queue_num: str, *, scoreboard_text: str = None):
-    # This command remains largely the same, as its purpose is administrative.
-    # Logic for parsing and inserting is kept as-is.
     try:
         text = scoreboard_text
         if not text and ctx.message.reference:
@@ -299,13 +292,6 @@ async def link(ctx, ign: str):
 
 @bot.command(name="stats", help="Get stats for a player. Can be filtered by champion.")
 async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
-    """
-    TASK 1: Refactored !stats command.
-    - Publicly accessible.
-    - Optional user and champion arguments.
-    - Uses PlayerConverter for user parsing.
-    - Outputs a formatted discord.Embed.
-    """
     target_user = user or ctx.author
     player_id = get_player_id(str(target_user.id))
 
@@ -334,15 +320,8 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
 
     await ctx.send(embed=embed)
 
-
 @bot.command(name="history", help="Shows the last 5 matches for a player.")
 async def history_cmd(ctx, user: PlayerConverter = None):
-    """
-    TASK 2: New !history command.
-    - Publicly accessible.
-    - Optional user argument.
-    - Outputs a formatted discord.Embed listing the last 5 games.
-    """
     target_user = user or ctx.author
     player_id = get_player_id(str(target_user.id))
 
@@ -367,16 +346,8 @@ async def history_cmd(ctx, user: PlayerConverter = None):
     embed.description = "\n".join(description)
     await ctx.send(embed=embed)
 
-
 @bot.command(name="leaderboard", aliases=['lb'], help="Shows the top players for a given stat.")
 async def leaderboard_cmd(ctx, stat: str, limit: int = 10):
-    """
-    TASK 3: New !leaderboard command.
-    - Publicly accessible.
-    - Required stat argument from a whitelist.
-    - Optional limit argument.
-    - Outputs a formatted discord.Embed.
-    """
     valid_stats = ["damage", "healing", "kda", "winrate", "obj_time"]
     if stat.lower() not in valid_stats:
         await ctx.send(f"Invalid stat. Please choose from: `{', '.join(valid_stats)}`.")
@@ -391,7 +362,6 @@ async def leaderboard_cmd(ctx, stat: str, limit: int = 10):
         await ctx.send(f"Could not generate a leaderboard for `{stat}`. Not enough data may be available.")
         return
 
-    # Create the embed
     stat_name_map = {
         "damage": "Damage/min", "healing": "Healing/min", "kda": "KDA Ratio",
         "winrate": "Winrate", "obj_time": "Objective Time/min"
@@ -402,11 +372,10 @@ async def leaderboard_cmd(ctx, stat: str, limit: int = 10):
     embed = discord.Embed(title=embed_title, color=discord.Color.gold())
 
     description = []
-    for i, (discord_id, value) in enumerate(leaderboard_data):
+    for i, (discord_id, ign, value) in enumerate(leaderboard_data):
         member = ctx.guild.get_member(int(discord_id))
-        name = member.display_name if member else f"ID: {discord_id}"
+        name = member.display_name if member else ign
         
-        # Formatting the value
         if stat.lower() == 'winrate':
             formatted_value = f"{value:.1f}%"
         elif stat.lower() == 'kda':
@@ -419,14 +388,8 @@ async def leaderboard_cmd(ctx, stat: str, limit: int = 10):
     embed.description = "\n".join(description)
     await ctx.send(embed=embed)
 
-
 @bot.command(name="top_champs", help="Get top 5 champs for a player.")
 async def top_champs_cmd(ctx, user: PlayerConverter = None):
-    """
-    TASK 4: Refactored !top_champs command.
-    - Publicly accessible.
-    - Outputs a formatted discord.Embed.
-    """
     target_user = user or ctx.author
     player_id = get_player_id(str(target_user.id))
 
@@ -452,14 +415,8 @@ async def top_champs_cmd(ctx, user: PlayerConverter = None):
         
     await ctx.send(embed=embed)
 
-
 @bot.command(name="compare", help="Compare stats between two players.")
 async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None):
-    """
-    TASK 4: Refactored !compare command.
-    - Publicly accessible.
-    - Outputs a formatted discord.Embed.
-    """
     target_user2 = user2 or ctx.author
     if user1 == target_user2:
         await ctx.send("You can't compare a player to themselves!")
@@ -475,7 +432,6 @@ async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None
 
     embed = discord.Embed(title=f"Comparison: {user1.display_name} vs {target_user2.display_name}", color=0x2ECC71)
     
-    # Player 1 Field
     p1_value = (
         f"**Games:** {p1_stats['games']} | **Winrate:** {p1_stats['winrate']}%\n"
         f"**KDA Ratio:** {p1_stats['kda_ratio']} | **Dmg/min:** {p1_stats['damage_dealt_pm']:,}\n"
@@ -488,7 +444,6 @@ async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None
         p1_value += "N/A"
     embed.add_field(name=user1.display_name, value=p1_value, inline=True)
 
-    # Player 2 Field
     p2_value = (
         f"**Games:** {p2_stats['games']} | **Winrate:** {p2_stats['winrate']}%\n"
         f"**KDA Ratio:** {p2_stats['kda_ratio']} | **Dmg/min:** {p2_stats['damage_dealt_pm']:,}\n"
@@ -501,7 +456,6 @@ async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None
         p2_value += "N/A"
     embed.add_field(name=target_user2.display_name, value=p2_value, inline=True)
     
-    # Synergy Field
     synergy_value = (
         f"**Together:** {result['with_winrate']}% WR ({result['with_games']} games)\n"
         f"**Against:** {result['against_winrate']}% WR ({result['against_games']} games for {user1.display_name})"
@@ -510,11 +464,9 @@ async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None
     
     await ctx.send(embed=embed)
 
-
 # --- DATA INGESTION LOGIC ---
 
 def parse_match_textbox(text):
-    # This function's logic remains the same as it correctly parses the data format.
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if not lines: raise ValueError("No lines found in match text!")
     match_info = lines[0].split(",")
@@ -531,7 +483,7 @@ def parse_match_textbox(text):
         parts = next(reader)
         if len(parts) != 12: raise ValueError(f"Malformed player line {idx}: {len(parts)} fields")
         
-        del parts[3]  # Remove rank/placement column
+        del parts[3]
         kda_parts = parts[4].split("/")
         if len(kda_parts) != 3: raise ValueError(f"Malformed KDA in line {idx}")
 
@@ -554,7 +506,6 @@ def parse_match_textbox(text):
         "team2_score": int(team2_score), "players": players,
     }
 
-
 class QueueNumModal(Modal):
     def __init__(self, match_data_text, author_id):
         super().__init__(title="Enter Queue Number")
@@ -576,16 +527,12 @@ class QueueNumModal(Modal):
             if queue_exists(queue_num):
                 await interaction.response.send_message(f"Queue number {queue_num} already exists.", ephemeral=True)
                 return
-
-            # Simplified registration check to allow ingestion even with unregistered players
-            # Admins can link them later
             insert_scoreboard(match_data, int(queue_num))
             await interaction.response.send_message(f"Match {match_id} for queue {queue_num} successfully recorded.", ephemeral=True)
         except ValueError as ve:
             await interaction.response.send_message(f"Malformed match data: {ve}", ephemeral=True)
         except Exception as e:
             await interaction.response.send_message(f"Error processing match data: {e}", ephemeral=True)
-
 
 class QueueNumView(View):
     def __init__(self, match_data_text, author_id):
@@ -600,16 +547,12 @@ class QueueNumView(View):
             return
         await interaction.response.send_modal(QueueNumModal(self.match_data_text, self.author_id))
 
-
 @bot.event
 async def on_message(message):
     if message.author.bot:
-        # Process commands first
         await bot.process_commands(message)
-        # Then handle automated ingestion logic
         try:
             if isinstance(message.channel, discord.TextChannel) and message.channel.name in ALLOWED_CHANNELS:
-                # Ingestion from NeatQueue (for player IDs)
                 if message.author.name == "NeatQueue" and message.author.discriminator == "0850" and message.embeds:
                     for embed in message.embeds:
                         queue_number_match = re.search(r"Queue #?(\d+)", embed.title or "") or re.search(r"Queue #?(\d+)", embed.description or "")
@@ -617,7 +560,6 @@ async def on_message(message):
                             queue_number = queue_number_match.group(1)
                             insert_embed(queue_number, embed.to_dict())
                 
-                # Ingestion from PaladinsAssistant (for match results)
                 elif message.author.name == "PaladinsAssistant" and message.author.discriminator == "2894":
                     match_text = message.content or (message.embeds[0].description if message.embeds else None)
                     if match_text:
@@ -629,7 +571,6 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# Catch-all for command errors
 @bot.event
 async def on_command_error(ctx, error):
     if isinstance(error, commands.CheckFailure):
@@ -641,6 +582,5 @@ async def on_command_error(ctx, error):
     else:
         print(f"An unhandled error occurred: {error}")
         await ctx.send("An unexpected error occurred. Please contact an administrator.")
-
 
 bot.run(os.getenv("BOT_TOKEN"))
