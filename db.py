@@ -696,3 +696,18 @@ def migrate_team_column():
         print(f"Migration error: {e}")
     finally:
         conn.close()
+
+
+def get_discord_id_for_ign(ign):
+    """NEW: Finds a discord_id by looking up a player's main IGN."""
+    conn = sqlite3.connect("match_data.db")
+    cursor = conn.cursor()
+    # Using LIKE for case-insensitivity (default in SQLite)
+    cursor.execute(
+        "SELECT discord_id FROM players WHERE player_ign LIKE ? AND discord_id IS NOT NULL;",
+        (ign,)
+    )
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+

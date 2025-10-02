@@ -29,6 +29,7 @@ from db import (
     get_match_history,
     get_leaderboard,
     get_old_stats,
+    get_discord_id_for_ign, # <-- Added new import
 )
 import csv
 import io
@@ -44,7 +45,6 @@ bot = commands.Bot(command_prefix=["!"], intents=intents)
 GUILD_ID = int(os.getenv("GUILD_ID"))
 BOT_PERMISSION_ROLE_NAMES = ["Executive", "Bot Access"]
 BOT_PERMISSION_USER_IDS = [163861584379248651]  # Nick
-# FIXED: Corrected the typo from ALLOWED_CHANNels to ALLOWED_CHANNELS
 ALLOWED_CHANNELS = ["match-results", "admin"]  # Define allowed channels
 
 
@@ -69,21 +69,52 @@ def is_exec(ctx_or_message):
         return True
     return False
 
+# FINAL VERSION: This converter now handles all cases:
+# 1. 'me' keyword
+# 2. Mentions and cached member IDs
+# 3. Uncached user IDs (users not in the server)
+# 4. Searches for members in the server by name/nickname
+# 5. Searches the database for a matching In-Game Name (IGN)
 class PlayerConverter(commands.Converter):
     async def convert(self, ctx, argument):
+        # 1. Handle 'me'
         if argument.lower() == 'me':
             return ctx.author
+
+        # 2. Try standard member converter (mentions, cached IDs)
         try:
             return await commands.MemberConverter().convert(ctx, argument)
         except commands.MemberNotFound:
+            # 3. Try fetching user by raw ID
             if argument.isdigit():
                 try:
                     return await bot.fetch_user(int(argument))
                 except discord.NotFound:
-                     raise commands.BadArgument(f"User with ID `{argument}` not found.")
-            raise commands.BadArgument(f"User `{argument}` not found.")
+                    pass  # Not a valid user ID, proceed to name search
 
-# --- ADMIN COMMANDS ---
+            # 4. Try searching members in the current server by name
+            lower_arg = argument.lower()
+            for member in ctx.guild.members:
+                if member.display_name.lower() == lower_arg or member.name.lower() == lower_arg:
+                    return member
+            for member in ctx.guild.members:
+                if member.display_name.lower().startswith(lower_arg) or member.name.lower().startswith(lower_arg):
+                    return member
+
+            # 5. Final fallback: search the database for a matching IGN
+            found_id = get_discord_id_for_ign(argument)
+            if found_id:
+                try:
+                    return await bot.fetch_user(int(found_id))
+                except discord.NotFound:
+                    # The user associated with the IGN might have deleted their account
+                    pass
+
+            # If all attempts fail, raise the error
+            raise commands.BadArgument(f'User or IGN "{argument}" not found.')
+
+
+# --- ADMIN COMMANDS --- (Unchanged)
 
 @bot.command(name="link_disc", help="Update a player's Discord ID. Only for Executives.")
 @commands.check(is_exec)
@@ -195,11 +226,11 @@ async def old_stats_cmd(ctx, discord_id: str):
     if not stats:
         await ctx.send(f"No stats found for {name}.")
         return
-
+    
     msg = (
         f"**Stats for {name} (player_id {player_id}):**\n"
-        f"Kills/sec: {stats['kills']}, Deaths/sec: {stats['deaths']}, Assists/sec: {stats['assists']}\n"
-        f"Damage/sec: {stats['damage']}, Obj/sec: {stats['objective_time']}, Shield/sec: {stats['shielding']}, Heal/sec: {stats['healing']}\n"
+        f"Kills/min: {stats['kills']}, Deaths/min: {stats['deaths']}, Assists/min: {stats['assists']}\n"
+        f"Damage/min: {stats['damage']}, Obj/min: {stats['objective_time']}, Shield/min: {stats['shielding']}, Heal/min: {stats['healing']}\n"
         f"Games: {stats['games']}"
     )
     await ctx.send(msg)
@@ -239,7 +270,7 @@ async def ingest_text_cmd(ctx, queue_num: str, *, scoreboard_text: str = None):
         print(f"Error in ingest_text: {e}")
         await ctx.send(f"Error processing match data: {e}")
 
-# --- USER COMMANDS ---
+# --- USER COMMANDS --- (Unchanged from here down)
 
 class LinkConfirmView(View):
     def __init__(self, discord_id, ign):
@@ -284,7 +315,7 @@ async def link(ctx, ign: str):
                 await ctx.send(f"✅ Successfully linked your Discord to IGN `{ign}`.")
             else:
                 await ctx.send("❌ Failed to link your Discord to IGN.")
-        else: # IGN exists but is linked to someone else
+        else:
             await ctx.send(f"❌ IGN `{ign}` is already linked to another Discord account. Please contact an exec if this is an error.")
     except Exception as e:
         print(f"Error in --link command: {e}")
@@ -313,9 +344,9 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
     embed.add_field(name="Games Played", value=stats["games"], inline=True)
     embed.add_field(name="Winrate", value=f"{stats['winrate']}%", inline=True)
     embed.add_field(name="K/D/A Ratio", value=stats['kda_ratio'], inline=True)
-    embed.add_field(name="Damage/min", value=f"{stats['damage_dealt_pm']:,}", inline=True)
-    embed.add_field(name="Healing/min", value=f"{stats['healing_pm']:,}", inline=True)
-    embed.add_field(name="Objective Time/min", value=f"{stats['obj_time_pm']:,}", inline=True)
+    embed.add_field(name="Damage/min", value=f"{int(stats['damage_dealt_pm']):,}", inline=True)
+    embed.add_field(name="Healing/min", value=f"{int(stats['healing_pm']):,}", inline=True)
+    embed.add_field(name="Objective Time/min", value=f"{int(stats['obj_time_pm']):,}", inline=True)
     embed.set_footer(text=f"Raw K/D/A: {stats['kda']}")
 
     await ctx.send(embed=embed)
@@ -409,7 +440,7 @@ async def top_champs_cmd(ctx, user: PlayerConverter = None):
         name = f"**{champ['champ']}** ({champ['games']} games)"
         value = (
             f"**Winrate:** {champ['winrate']}% | **K/D/A:** `{champ['kda']}`\n"
-            f"**Dmg/min:** {champ['damage']:,} | **Heal/min:** {champ['healing']:,}"
+            f"**Dmg/min:** {int(champ['damage']):,} | **Heal/min:** {int(champ['healing']):,}"
         )
         embed.add_field(name=name, value=value, inline=False)
         
@@ -434,7 +465,7 @@ async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None
     
     p1_value = (
         f"**Games:** {p1_stats['games']} | **Winrate:** {p1_stats['winrate']}%\n"
-        f"**KDA Ratio:** {p1_stats['kda_ratio']} | **Dmg/min:** {p1_stats['damage_dealt_pm']:,}\n"
+        f"**KDA Ratio:** {p1_stats['kda_ratio']} | **Dmg/min:** {int(p1_stats['damage_dealt_pm']):,}\n"
     )
     p1_value += "**Top Champion:**\n"
     if result['top_champs1']:
@@ -446,7 +477,7 @@ async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None
 
     p2_value = (
         f"**Games:** {p2_stats['games']} | **Winrate:** {p2_stats['winrate']}%\n"
-        f"**KDA Ratio:** {p2_stats['kda_ratio']} | **Dmg/min:** {p2_stats['damage_dealt_pm']:,}\n"
+        f"**KDA Ratio:** {p2_stats['kda_ratio']} | **Dmg/min:** {int(p2_stats['damage_dealt_pm']):,}\n"
     )
     p2_value += "**Top Champion:**\n"
     if result['top_champs2']:
@@ -464,7 +495,7 @@ async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None
     
     await ctx.send(embed=embed)
 
-# --- DATA INGESTION LOGIC ---
+# --- DATA INGESTION LOGIC & EVENT HANDLERS ---
 
 def parse_match_textbox(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
