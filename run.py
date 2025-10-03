@@ -346,7 +346,7 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
     embed.add_field(name="K/D/A Ratio", value=stats['kda_ratio'], inline=True)
     embed.add_field(name="Damage/min", value=f"{int(stats['damage_dealt_pm']):,}", inline=True)
     embed.add_field(name="Healing/min", value=f"{int(stats['healing_pm']):,}", inline=True)
-    embed.add_field(name="Objective Time/min", value=f"{int(stats['obj_time_pm']):,}", inline=True)
+    embed.add_field(name="AVG Objective Time", value=f"{int(stats['obj_time']):,}", inline=True)
     embed.set_footer(text=f"Raw K/D/A: {stats['kda']}")
 
     await ctx.send(embed=embed)

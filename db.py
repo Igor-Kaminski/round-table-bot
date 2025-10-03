@@ -464,7 +464,7 @@ def get_player_stats(player_id, champion=None):
         total_kills, total_deaths, total_assists, total_damage, total_obj_time, total_shielding, total_healing, total_time_in_minutes, total_wins = [sum(col) for col in zip(*rows)]
         games_played = len(rows)
         
-        # FIX: The 'time' column is already in minutes, so no conversion is needed.
+    
         if total_time_in_minutes == 0:
             total_time_in_minutes = 1 # Avoid division by zero
 
@@ -476,7 +476,7 @@ def get_player_stats(player_id, champion=None):
             "damage_dealt_pm": round(total_damage / total_time_in_minutes, 2),
             "healing_pm": round(total_healing / total_time_in_minutes, 2),
             "shielding_pm": round(total_shielding / total_time_in_minutes, 2),
-            "obj_time_pm": round(total_obj_time / total_time_in_minutes, 2),
+            "obj_time": round(total_obj_time / games_played, 2),
         }
     finally:
         conn.close()
@@ -509,7 +509,6 @@ def get_top_champs(player_id):
             damage, obj_time, shielding, healing, total_time_in_minutes
         ) = row
         
-        # FIX: The 'time' column is already in minutes.
         if total_time_in_minutes == 0:
             total_time_in_minutes = 1
 
@@ -518,7 +517,7 @@ def get_top_champs(player_id):
             "winrate": round(100 * wins / games, 1) if games else 0,
             "kda": f"{round(kills/games, 1)}/{round(deaths/games, 1)}/{round(assists/games, 1)}",
             "damage": round(damage / total_time_in_minutes, 2),
-            "objective_time": round(obj_time / total_time_in_minutes, 2),
+            "objective_time": round(obj_time, 2),
             "shielding": round(shielding / total_time_in_minutes, 2),
             "healing": round(healing / total_time_in_minutes, 2),
         }
@@ -661,7 +660,6 @@ def get_old_stats(player_id):
     conn.close()
     if total_time == 0: total_time = 1
     agg_stats = [sum(col) for col in zip(*[row[:7] for row in rows])]
-    # This logic now correctly calculates per-minute stats since 'total_time' is in minutes
     norm_stats = [round(val / total_time, 2) for val in agg_stats]
     return {
         "kills": norm_stats[0], "deaths": norm_stats[1], "assists": norm_stats[2], "damage": norm_stats[3],
