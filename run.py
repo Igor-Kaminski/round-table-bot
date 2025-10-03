@@ -276,12 +276,23 @@ async def old_stats_cmd(ctx, discord_id: str):
 @commands.check(is_exec)
 async def ingest_text_cmd(ctx, queue_num: str, *, scoreboard_text: str = None):
     try:
+        # --- Step 1: Gather the text from arguments or a reply ---
         text = scoreboard_text
         if not text and ctx.message.reference:
             ref_msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
             if ref_msg:
                 text = ref_msg.content or (ref_msg.embeds[0].description if ref_msg.embeds else None)
-
+        
+        # --- Step 2: Restore the "forgiving format" logic from your old code ---
+        raw_queue_str = queue_num.strip()
+        if "," in raw_queue_str or not raw_queue_str.isdigit():
+            # This handles when the user pastes the header right after the command.
+            # It merges the misplaced header back into the main text block.
+            text = (raw_queue_str + (" " + text if text else "")).strip()
+            # It clears the queue string so we can default to the match_id later.
+            raw_queue_str = None
+            
+        # --- Step 3: Proceed with parsing ---
         if not text:
             await ctx.send("No scoreboard text provided. Paste it after the command or reply to a message containing it.")
             return
@@ -289,8 +300,16 @@ async def ingest_text_cmd(ctx, queue_num: str, *, scoreboard_text: str = None):
         cleaned_text = text.strip().strip("`")
         match_data = parse_match_textbox(cleaned_text)
         match_id = match_data["match_id"]
-        queue_value = int(queue_num)
 
+        # --- Step 4: Intelligently decide the queue number ---
+        if raw_queue_str and raw_queue_str.isdigit():
+            # Use the number the user provided if it was a valid, single number.
+            queue_value = int(raw_queue_str)
+        else:
+            # Otherwise, default to using the Match ID as the queue number.
+            queue_value = int(match_id)
+
+        # --- Step 5: Run safety checks and insert the data ---
         if match_exists(match_id):
             await ctx.send(f"Match ID {match_id} already exists in the database.")
             return
@@ -301,12 +320,12 @@ async def ingest_text_cmd(ctx, queue_num: str, *, scoreboard_text: str = None):
 
         insert_scoreboard(match_data, queue_value)
         await ctx.send(f"Match {match_id} for queue {queue_value} successfully recorded.")
+        
     except ValueError as ve:
         await ctx.send(f"Malformed match data: {ve}")
     except Exception as e:
         print(f"Error in ingest_text: {e}")
         await ctx.send(f"Error processing match data: {e}")
-
 # --- USER COMMANDS ---
 
 class LinkConfirmView(View):
@@ -971,10 +990,13 @@ async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None
 def parse_match_textbox(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
     if not lines: raise ValueError("No lines found in match text!")
+    
     match_info = lines[0].split(",")
     if len(match_info) < 6: raise ValueError("Malformed match info line!")
+    
     try:
-        match_id, time, region, map_name, team1_score, team2_score = [s.strip() for s in match_info]
+        # MODIFIED: Only unpack the first 6 elements and ignore any extras.
+        match_id, time, region, map_name, team1_score, team2_score = [s.strip() for s in match_info[:6]]
     except Exception:
         raise ValueError("Could not unpack match info line.")
 
