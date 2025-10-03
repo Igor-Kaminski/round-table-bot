@@ -13,9 +13,9 @@ from db import (
     insert_embed,
     read_embeds,
     verify_registered_users,
+    get_registered_igns,
     match_exists,
     queue_exists,
-    get_registered_igns,
     link_ign,
     add_alt_ign,
     get_ign_link_info,
@@ -151,7 +151,7 @@ class PlayerConverter(commands.Converter):
             raise commands.BadArgument(f'User or IGN "{argument}" not found.')
 
 
-# --- ADMIN COMMANDS --- (Unchanged)
+# --- ADMIN COMMANDS ---
 
 @bot.command(name="link_disc", help="Update a player's Discord ID. Only for Executives.")
 @commands.check(is_exec)
@@ -307,7 +307,7 @@ async def ingest_text_cmd(ctx, queue_num: str, *, scoreboard_text: str = None):
         print(f"Error in ingest_text: {e}")
         await ctx.send(f"Error processing match data: {e}")
 
-# --- USER COMMANDS --- (Unchanged from here down)
+# --- USER COMMANDS ---
 
 class LinkConfirmView(View):
     def __init__(self, discord_id, ign):
@@ -392,7 +392,6 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
             icon_file = discord.File(icon_path, filename="icon.png")
             embed.set_thumbnail(url="attachment://icon.png")
         
-        # FIXED: Corrected all variables to use 'champ_stats' instead of 'stats'
         champ_data = {
             f"--- Champion: {full_champion_name} ---": "",
             "Winrate": f"{champ_stats['winrate']:.2f}% ({champ_stats['wins']}-{champ_stats['losses']})",
@@ -1006,8 +1005,44 @@ class QueueNumModal(Modal):
             if queue_exists(queue_num):
                 await interaction.response.send_message(f"Queue number {queue_num} already exists.", ephemeral=True)
                 return
+
+            # --- RE-IMPLEMENTED SAFETY CHECK ---
+            # This logic now runs before inserting the scoreboard.
+            discord_ids = read_embeds(int(queue_num))
+            if not discord_ids:
+                await interaction.response.send_message(
+                    f"❌ **Match Not Recorded.** Could not find the original NeatQueue embed for Queue `{queue_num}`. "
+                    "Player registration cannot be verified.",
+                    ephemeral=True
+                )
+                return
+
+            ign_list = [player["name"] for player in match_data["players"]]
+            
+            _, igns_not_registered = get_registered_igns(ign_list)
+            _, unregistered_discords = verify_registered_users(discord_ids)
+
+            warning_msgs = []
+            if unregistered_discords:
+                mentions = ", ".join([f"<@{d}>" for d in unregistered_discords])
+                warning_msgs.append(f"**Unlinked Discord Accounts:** {mentions}")
+            if igns_not_registered:
+                igns = ", ".join(f"`{ign}`" for ign in igns_not_registered)
+                warning_msgs.append(f"**Unlinked IGNs:** {igns}")
+
+            # If any players are unlinked, block the insertion and send a detailed error.
+            if warning_msgs:
+                await interaction.response.send_message(
+                    "**❌ Match Not Recorded.** The following players must link their accounts first using `!link <ign>`:\n\n" + "\n".join(warning_msgs),
+                    ephemeral=True
+                )
+                return
+            # --- END OF SAFETY CHECK ---
+
+            # If all checks pass, insert the data.
             insert_scoreboard(match_data, int(queue_num))
-            await interaction.response.send_message(f"Match {match_id} for queue {queue_num} successfully recorded.", ephemeral=True)
+            await interaction.response.send_message(f"✅ Match {match_id} for queue {queue_num} successfully recorded.", ephemeral=True)
+
         except ValueError as ve:
             await interaction.response.send_message(f"Malformed match data: {ve}", ephemeral=True)
         except Exception as e:
@@ -1063,8 +1098,3 @@ async def on_command_error(ctx, error):
         await ctx.send("An unexpected error occurred. Please contact an administrator.")
 
 bot.run(os.getenv("BOT_TOKEN"))
-
-
-
-
-
