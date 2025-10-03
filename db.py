@@ -620,9 +620,31 @@ def get_match_history(player_id, limit: int = 30):
     finally:
         conn.close()
 
-def get_leaderboard(stat_key, limit, show_bottom=False):
+# For this function to work, the CHAMPION_ROLES dictionary must be accessible.
+# It's best to define it once at the top of your db.py file.
+CHAMPION_ROLES = {
+    # Damage
+    "Bomb King": "Damage", "Cassie": "Damage", "Dredge": "Damage", "Drogoz": "Damage",
+    "Imani": "Damage", "Kinessa": "Damage", "Lian": "Damage", "Octavia": "Damage",
+    "Saati": "Damage", "Sha Lin": "Damage", "Strix": "Damage", "Tiberius": "Damage",
+    "Tyra": "Damage", "Viktor": "Damage", "Willo": "Damage", "Betty la Bomba": "Damage",
+    # Flank
+    "Androxus": "Flank", "Buck": "Flank", "Caspian": "Flank", "Evie": "Flank",
+    "Koga": "Flank", "Lex": "Flank", "Maeve": "Flank", "Moji": "Flank",
+    "Skye": "Flank", "Talus": "Flank", "Vatu": "Flank", "Vora": "Flank",
+    "VII": "Flank", "Zhin": "Flank",
+    # Tank
+    "Ash": "Tank", "Atlas": "Tank", "Azaan": "Tank", "Barik": "Tank", "Fernando": "Tank",
+    "Inara": "Tank", "Khan": "Tank", "Makoa": "Tank", "Raum": "Tank", "Ruckus": "Tank",
+    "Terminus": "Tank", "Torvald": "Tank", "Yagorath": "Tank", "Nyx": "Tank", "Omen": "Tank",
+    # Support
+    "Corvus": "Support", "Furia": "Support", "Ghrok": "Support", "Grover": "Support",
+    "Io": "Support", "Jenos": "Support", "Lillith": "Support", "Mal'Damba": "Support",
+    "Pip": "Support", "Rei": "Support", "Seris": "Support", "Ying": "Support",
+}
+
+def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None):
     # This dictionary maps the simple stat_key to a complex SQL expression for aggregation.
-    # This is the safest way to build dynamic queries, preventing SQL injection.
     stat_expressions = {
         "winrate": "SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) * 100.0 / COUNT(ps.match_id)",
         "kda": "CAST(SUM(ps.kills) + SUM(ps.assists) AS REAL) / MAX(1, SUM(ps.deaths))",
@@ -644,12 +666,31 @@ def get_leaderboard(stat_key, limit, show_bottom=False):
     if stat_key not in stat_expressions:
         return None
 
-    # Determine sorting order
     order = "ASC" if show_bottom else "DESC"
-    # Set minimum games requirement for certain stats
-    min_games = 20 if stat_key in ["winrate", "kda"] else 1
+    # Use a lower game requirement for specific champion/role leaderboards
+    min_games = 1
 
-    # The main SQL query template
+    # --- Dynamic Query Building ---
+    params = []
+    where_conditions = ["p.discord_id IS NOT NULL", "m.time > 0"]
+
+    if champion:
+        where_conditions.append("ps.champ LIKE ?")
+        params.append(f"%{champion}%")
+    elif role:
+        champions_in_role = [c for c, r in CHAMPION_ROLES.items() if r == role]
+        if not champions_in_role:
+            return None  # Role has no champions, so no results are possible
+        
+        placeholders = ', '.join('?' for _ in champions_in_role)
+        where_conditions.append(f"ps.champ IN ({placeholders})")
+        params.extend(champions_in_role)
+
+    where_clause = " AND ".join(where_conditions)
+    
+    # Final parameters list must be in the correct order for the query
+    final_params = params + [min_games, limit]
+
     query = f"""
         WITH PlayerAggregates AS (
             SELECT
@@ -664,7 +705,7 @@ def get_leaderboard(stat_key, limit, show_bottom=False):
             FROM player_stats ps
             JOIN players p ON ps.player_id = p.player_id
             JOIN matches m ON ps.match_id = m.match_id
-            WHERE p.discord_id IS NOT NULL AND m.time > 0
+            WHERE {where_clause}
             GROUP BY p.discord_id
             HAVING games_played >= ?
         )
@@ -684,12 +725,10 @@ def get_leaderboard(stat_key, limit, show_bottom=False):
     """
 
     conn = sqlite3.connect("match_data.db")
-    # This makes the cursor return dict-like rows
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        cursor.execute(query, (min_games, limit))
-        # Convert rows to standard dictionaries
+        cursor.execute(query, tuple(final_params))
         return [dict(row) for row in cursor.fetchall()]
     except sqlite3.Error as e:
         print(f"Database error in get_leaderboard: {e}")

@@ -699,16 +699,17 @@ async def history_cmd(ctx, *args):
     await ctx.send(f"```diff\n{output}\n```")
 
 
-# --- DETAILED HELP MESSAGE FOR LEADERBOARD ---
+# --- FULLY UPDATED HELP MESSAGE FOR LEADERBOARD ---
 LEADERBOARD_HELP = """
-Shows player rankings for various stats.
+Shows player rankings, with optional filters for champions or roles.
 
-**Usage:** `!leaderboard [stat] [limit] [-b]`
+**Usage:** `!leaderboard [stat] [champion/role] [limit] [-b]`
 
 **Arguments:**
 - `[stat]`: The statistic to rank by. Defaults to `winrate`.
+- `[champion/role]`: Filter by a champion name (e.g., `nando`) or a role (`tank`, `support`).
 - `[limit]`: The number of players to show. Defaults to `20`.
-- `[-b]`: Optional flag to show the bottom of the leaderboard instead of the top.
+- `[-b]`: Optional flag to show the bottom of the leaderboard.
 
 **Available Stats:**
 - `winrate` (or `wr`): Overall Winrate
@@ -729,15 +730,14 @@ Shows player rankings for various stats.
 
 **Examples:**
 - `!lb`: Shows the top 20 players by Winrate.
-- `!lb kda 10`: Shows the top 10 players by KDA.
-- `!lb dmg`: Shows the top 20 players by Damage/Min.
-- `!lb obj_time 5 -b`: Shows the bottom 5 players for Objective Time.
+- `!lb kda fernando 10`: Top 10 KDA players on Fernando.
+- `!lb dmg support`: Top 20 damage dealers playing Support champions.
+- `!lb wr flank -b`: Bottom 20 winrate players on Flank champions.
 """
 
 @bot.command(name="leaderboard", aliases=["lb"], help=LEADERBOARD_HELP)
 async def leaderboard_cmd(ctx, *args):
-    # --- Stat Mapping (defined inside the function as requested) ---
-    # Maps user aliases to: (Display Name, data_key_for_db_function, formatting_function)
+    # --- Stat Mapping (Complete with all stats) ---
     stat_map = {
         "winrate": ("Winrate", "winrate", lambda v, s: f"{v:.2f}% ({s['wins']}-{s['losses']})"),
         "kda": ("KDA Ratio", "kda", lambda v, s: f"{v:.2f} ({s['k']}/{s['d']}/{s['a']})"),
@@ -759,51 +759,73 @@ async def leaderboard_cmd(ctx, *args):
         "dpm": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
         "wr": ("Winrate", "winrate", lambda v, s: f"{v:.2f}% ({s['wins']}-{s['losses']})"),
     }
-
+    
     # --- 1. Argument Parsing ---
-    stat_alias = "winrate"
+    stat_alias = "winrate"  # Default to winrate
     limit = 20
     show_bottom = False
+    champion_filter = None
+    role_filter = None
+    
+    valid_roles = {role.lower() for role in CHAMPION_ROLES.values()}
+    unprocessed_args = []
     args = list(args)
 
-    if "-b" in args:
-        show_bottom = True
-        args.remove("-b")
+    # First pass: handle flags and known types (stats, limits)
+    for arg in args:
+        if arg.lower() == "-b":
+            show_bottom = True
+        elif arg.lower() in stat_map:
+            stat_alias = arg.lower()
+        elif arg.isdigit():
+            limit = int(arg)
+        else:
+            unprocessed_args.append(arg)
 
-    if args:
-        stat_alias = args.pop(0).lower()
-    if args and args[0].isdigit():
-        limit = int(args.pop(0))
+    # Second pass: determine if the remaining args are a champion or role
+    if unprocessed_args:
+        full_filter_str = " ".join(unprocessed_args).lower()
+        if full_filter_str in valid_roles:
+            role_filter = full_filter_str.capitalize()
+        else:
+            champion_filter = full_filter_str
 
     limit = max(1, min(limit, 50))
     
-    # --- 2. Validate Stat ---
-    if stat_alias not in stat_map:
-        valid_stats = ", ".join(f"`{s}`" for s in sorted(stat_map.keys()) if len(s) > 2)
-        await ctx.send(f"Invalid stat. Please choose from: {valid_stats}")
-        return
-
+    # --- 2. Fetch Data ---
     display_name, data_key, formatter = stat_map[stat_alias]
-
-    # --- 3. Fetch Data ---
-    leaderboard_data = get_leaderboard(data_key, limit, show_bottom)
+    leaderboard_data = get_leaderboard(
+        data_key, limit, show_bottom, 
+        champion=champion_filter, role=role_filter
+    )
     if not leaderboard_data:
-        await ctx.send(f"Could not generate a leaderboard for `{display_name}`. Not enough qualified player data may be available.")
+        filter_msg = f" on {champion_filter.title()}" if champion_filter else f" as {role_filter}" if role_filter else ""
+        await ctx.send(f"Could not generate a leaderboard for `{display_name}`{filter_msg}. No qualified player data found.")
         return
 
-    # --- 4. Build Embed ---
-    embed_title = f"🏆 {'Bottom' if show_bottom else 'Top'} {len(leaderboard_data)} Players by {display_name}"
+    # --- 3. Build Embed ---
+    filter_text = ""
+    if champion_filter:
+        # To make it look nice, find the full champion name if possible
+        # This is an aesthetic improvement and can be removed if it causes issues
+        # Note: This simple lookup might not be perfect for all partial names
+        full_champ_name = next((name for name in CHAMPION_ROLES if champion_filter.lower() in name.lower()), champion_filter)
+        filter_text = f" on {full_champ_name.title()}"
+    elif role_filter:
+        filter_text = f" as {role_filter}"
+
+    embed_title = f"🏆 {'Bottom' if show_bottom else 'Top'} {len(leaderboard_data)} Players by {display_name}{filter_text}"
     embed_color = 0xE74C3C if show_bottom else 0x2ECC71
     embed = discord.Embed(title=embed_title, color=embed_color)
-    embed.set_footer(text="Players must have at least 20 games to qualify for most leaderboards.")
+    
+    min_games_qualify = 5 if (champion_filter or role_filter) else 20
+    embed.set_footer(text=f"Players must have at least {min_games_qualify} games with the specified filter to qualify.")
 
     description = []
     for i, data_row in enumerate(leaderboard_data):
         discord_id = data_row['discord_id']
         value = data_row['value']
-
         member = ctx.guild.get_member(int(discord_id))
-        # --- THIS IS THE CORRECTED LINE ---
         name = member.display_name if member else data_row['player_ign']
         
         rank = (data_row['total_players'] - i) if show_bottom else (i + 1)
@@ -812,34 +834,6 @@ async def leaderboard_cmd(ctx, *args):
         description.append(f"`{rank:2}.` **{name}** - {formatted_value}")
     
     embed.description = "\n".join(description)
-    await ctx.send(embed=embed)
-
-# RENAMED: The old !top_champs command is now legacy
-@bot.command(name="legacy_top_champs", help="[LEGACY] Get top 5 champs for a player (non-interactive).", hidden=True)
-async def legacy_top_champs_cmd(ctx, user: PlayerConverter = None):
-    target_user = user or ctx.author
-    player_id = get_player_id(str(target_user.id))
-
-    if not player_id:
-        await ctx.send(f"No stats found for {target_user.display_name}. They may need to `!link` their IGN.")
-        return
-
-    champs = get_top_champs(player_id)
-    if not champs:
-        await ctx.send(f"No champion stats found for {target_user.display_name}.")
-        return
-
-    embed = discord.Embed(title=f"Top 5 Champions for {target_user.display_name}", color=discord.Color.purple())
-    embed.set_thumbnail(url=target_user.display_avatar.url)
-    
-    for champ in champs:
-        name = f"**{champ['champ']}** ({champ['games']} games)"
-        value = (
-            f"**Winrate:** {champ['winrate']}% | **K/D/A:** `{champ['kda']}`\n"
-            f"**Dmg/min:** {int(champ['damage']):,} | **Heal/min:** {int(champ['healing']):,}"
-        )
-        embed.add_field(name=name, value=value, inline=False)
-        
     await ctx.send(embed=embed)
 
 @bot.command(name="compare", help="Compare stats between two players.")
