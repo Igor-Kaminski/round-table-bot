@@ -3,6 +3,7 @@ from discord.ext import commands
 import os
 import dotenv
 import re
+import datetime
 from discord.ui import View, Button, Modal, TextInput
 from db import (
     create_database,
@@ -29,7 +30,8 @@ from db import (
     get_match_history,
     get_leaderboard,
     get_old_stats,
-    get_discord_id_for_ign, # <-- Added new import
+    get_discord_id_for_ign,
+    get_champion_name, 
 )
 import csv
 import io
@@ -68,6 +70,17 @@ def is_exec(ctx_or_message):
     if author.id in BOT_PERMISSION_USER_IDS:
         return True
     return False
+
+
+
+def get_champion_icon_path(champion_name):
+    """Formats a champion name into a valid file path for its icon."""
+    # Converts "Champion Name" into "champion_name.png"
+    formatted_name = champion_name.lower().replace(" ", "_").replace("'", "")
+    # This assumes your icon files are named like 'androxus.png', 'sha_lin.png', etc.
+    # and are located in 'icons/champ_icons/'
+    return os.path.join("icons", "champ_icons", f"{formatted_name}.png")
+
 
 # FINAL VERSION: This converter now handles all cases:
 # 1. 'me' keyword
@@ -321,8 +334,10 @@ async def link(ctx, ign: str):
         print(f"Error in --link command: {e}")
         await ctx.send("An error occurred while linking your account.")
 
+
 @bot.command(name="stats", help="Get stats for a player. Can be filtered by champion.")
 async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
+    start_time = datetime.datetime.now()
     target_user = user or ctx.author
     player_id = get_player_id(str(target_user.id))
 
@@ -330,26 +345,76 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
         await ctx.send(f"No stats found for {target_user.display_name}. They may need to link their IGN using `!link <ign>`.")
         return
 
-    stats = get_player_stats(player_id, champion)
-    if not stats or stats["games"] == 0:
-        await ctx.send(f"No stats found for {target_user.display_name}" + (f" on {champion.capitalize()}" if champion else "."))
-        return
+    icon_file = None
+    embed = discord.Embed(color=discord.Color.blue())
 
-    title = f"Stats for {target_user.display_name}"
     if champion:
-        title += f" as {champion.capitalize()}"
+        # --- CHAMPION-SPECIFIC STATS LAYOUT ---
+        full_champion_name = get_champion_name(player_id, champion)
+        if not full_champion_name:
+            await ctx.send(f"No stats found for {target_user.display_name} on a champion matching '{champion}'.")
+            return
+        
+        champ_stats = get_player_stats(player_id, full_champion_name)
+        global_stats = get_player_stats(player_id) # Get global stats for comparison
 
-    embed = discord.Embed(title=title, color=discord.Color.blue())
-    embed.set_thumbnail(url=target_user.display_avatar.url)
-    embed.add_field(name="Games Played", value=stats["games"], inline=True)
-    embed.add_field(name="Winrate", value=f"{stats['winrate']}%", inline=True)
-    embed.add_field(name="K/D/A Ratio", value=stats['kda_ratio'], inline=True)
-    embed.add_field(name="Damage/min", value=f"{int(stats['damage_dealt_pm']):,}", inline=True)
-    embed.add_field(name="Healing/min", value=f"{int(stats['healing_pm']):,}", inline=True)
-    embed.add_field(name="AVG Objective Time", value=f"{int(stats['obj_time']):,}", inline=True)
-    embed.set_footer(text=f"Raw K/D/A: {stats['kda']}")
+        if not champ_stats or champ_stats["games"] == 0:
+            await ctx.send(f"No stats found for {target_user.display_name} on {full_champion_name}.")
+            return
 
-    await ctx.send(embed=embed)
+        embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=target_user.display_avatar.url)
+
+        # Set champion icon as thumbnail
+        icon_path = get_champion_icon_path(full_champion_name)
+        if os.path.exists(icon_path):
+            icon_file = discord.File(icon_path, filename="icon.png")
+            embed.set_thumbnail(url="attachment://icon.png")
+        
+        # Build the description "black box"
+        description = (
+            f"```\n"
+            f"Champion: {full_champion_name}\n"
+            f"KDA:      {champ_stats['kda_ratio']:.2f} ({champ_stats['raw_k']}/{champ_stats['raw_d']}/{champ_stats['raw_a']})\n"
+            f"Winrate:  {champ_stats['winrate']:.2f}% ({champ_stats['wins']}-{champ_stats['losses']})\n"
+            f"\n"
+            f"Global KDA:      {global_stats['kda_ratio']:.2f}\n"
+            f"Global Winrate:  {global_stats['winrate']:.2f}% ({global_stats['wins']}-{global_stats['losses']})\n"
+            f"```"
+        )
+        embed.description = description
+    
+    else:
+        # --- GENERAL STATS LAYOUT ---
+        stats = get_player_stats(player_id)
+        if not stats or stats["games"] == 0:
+            await ctx.send(f"No stats found for {target_user.display_name}.")
+            return
+            
+        embed.title = f"Stats for {target_user.display_name}"
+        embed.set_thumbnail(url=target_user.display_avatar.url)
+
+        # Build the description "black box"
+        description = (
+            f"```\n"
+            f"Winrate:           {stats['winrate']:.2f}% ({stats['wins']}-{stats['losses']})\n"
+            f"KDA:               {stats['kda_ratio']:.2f} ({stats['raw_k']}/{stats['raw_d']}/{stats['raw_a']})\n"
+            f"Damage/Min:        {int(stats['damage_dealt_pm']):,}\n"
+            f"Healing/Min:       {int(stats['healing_pm']):,}\n"
+            f"AVG Objective Time: {int(stats['obj_time']):,}\n"
+            f"```"
+        )
+        embed.description = description
+    
+    # Set the footer
+    fetch_time = (datetime.datetime.now() - start_time).total_seconds() * 1000
+    footer_text = f"Fetched in {fetch_time:.0f}ms"
+    if not champion: # Add Player ID only to the general stats page
+        footer_text = f"Player ID: {target_user.id}  •  {footer_text}"
+
+    embed.set_footer(text=footer_text, icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
+
+    await ctx.send(embed=embed, file=icon_file)
+
 
 @bot.command(name="history", help="Shows the last 5 matches for a player.")
 async def history_cmd(ctx, user: PlayerConverter = None):

@@ -452,8 +452,9 @@ def get_player_stats(player_id, champion=None):
         """
         params = [player_id]
         if champion:
-            query += " AND ps.champ LIKE ?"
-            params.append(f"%{champion}%")
+            # Use an exact match for champion stats to be more precise
+            query += " AND ps.champ = ?"
+            params.append(champion)
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
@@ -463,23 +464,31 @@ def get_player_stats(player_id, champion=None):
         # Unpack summed columns
         total_kills, total_deaths, total_assists, total_damage, total_obj_time, total_shielding, total_healing, total_time_in_minutes, total_wins = [sum(col) for col in zip(*rows)]
         games_played = len(rows)
+        total_losses = games_played - total_wins
         
-    
         if total_time_in_minutes == 0:
             total_time_in_minutes = 1 # Avoid division by zero
 
         return {
             "games": games_played,
-            "winrate": round((total_wins / games_played) * 100, 1) if games_played > 0 else 0,
+            "wins": total_wins,
+            "losses": total_losses,
+            "raw_k": total_kills,
+            "raw_d": total_deaths,
+            "raw_a": total_assists,
+            "winrate": round((total_wins / games_played) * 100, 2) if games_played > 0 else 0,
             "kda": f"{total_kills}/{total_deaths}/{total_assists}",
             "kda_ratio": round((total_kills + total_assists) / max(1, total_deaths), 2),
             "damage_dealt_pm": round(total_damage / total_time_in_minutes, 2),
             "healing_pm": round(total_healing / total_time_in_minutes, 2),
             "shielding_pm": round(total_shielding / total_time_in_minutes, 2),
-            "obj_time": round(total_obj_time / games_played, 2),
+            "obj_time": round(total_obj_time / games_played, 2), 
         }
     finally:
         conn.close()
+
+
+
 
 def get_top_champs(player_id):
     conn = sqlite3.connect("match_data.db")
@@ -704,6 +713,19 @@ def get_discord_id_for_ign(ign):
     cursor.execute(
         "SELECT discord_id FROM players WHERE player_ign LIKE ? AND discord_id IS NOT NULL;",
         (ign,)
+    )
+    result = cursor.fetchone()
+    conn.close()
+    return result[0] if result else None
+
+
+def get_champion_name(player_id, partial_name):
+    """NEW: Finds the full, correct champion name from a partial name for a specific player."""
+    conn = sqlite3.connect("match_data.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        "SELECT DISTINCT champ FROM player_stats WHERE player_id = ? AND champ LIKE ? LIMIT 1;",
+        (player_id, f"%{partial_name}%")
     )
     result = cursor.fetchone()
     conn.close()
