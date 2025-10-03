@@ -3,7 +3,7 @@ from discord.ext import commands
 import os
 import dotenv
 import re
-import datetime
+import time
 from discord.ui import View, Button, Modal, TextInput
 from db import (
     create_database,
@@ -335,12 +335,19 @@ async def link(ctx, ign: str):
         await ctx.send("An error occurred while linking your account.")
 
 
-@bot.command(name="stats", help="Get stats for a player. Can be filtered by champion.")
+@bot.command(name="stats", help="Get stats for a player. Use '-d' for a detailed view.")
 async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
-    start_time = datetime.datetime.now()
+    start_time = time.monotonic()
     target_user = user or ctx.author
-    player_id = get_player_id(str(target_user.id))
+    
+    detailed = False
+    if champion and '-d' in champion.lower():
+        detailed = True
+        champion = re.sub(r'\s*-d\s*', '', champion, flags=re.IGNORECASE).strip()
+        if not champion:
+            champion = None
 
+    player_id = get_player_id(str(target_user.id))
     if not player_id:
         await ctx.send(f"No stats found for {target_user.display_name}. They may need to link their IGN using `!link <ign>`.")
         return
@@ -349,42 +356,66 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
     embed = discord.Embed(color=discord.Color.blue())
 
     if champion:
-        # --- CHAMPION-SPECIFIC STATS LAYOUT ---
+        # --- CHAMPION-SPECIFIC STATS ---
         full_champion_name = get_champion_name(player_id, champion)
         if not full_champion_name:
             await ctx.send(f"No stats found for {target_user.display_name} on a champion matching '{champion}'.")
             return
         
         champ_stats = get_player_stats(player_id, full_champion_name)
-        global_stats = get_player_stats(player_id) # Get global stats for comparison
-
         if not champ_stats or champ_stats["games"] == 0:
             await ctx.send(f"No stats found for {target_user.display_name} on {full_champion_name}.")
             return
 
         embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=target_user.display_avatar.url)
-
-        # Set champion icon as thumbnail
         icon_path = get_champion_icon_path(full_champion_name)
         if os.path.exists(icon_path):
             icon_file = discord.File(icon_path, filename="icon.png")
             embed.set_thumbnail(url="attachment://icon.png")
-        
-        # Build the description "black box"
-        description = (
-            f"```\n"
-            f"Champion: {full_champion_name}\n"
-            f"KDA:      {champ_stats['kda_ratio']:.2f} ({champ_stats['raw_k']}/{champ_stats['raw_d']}/{champ_stats['raw_a']})\n"
-            f"Winrate:  {champ_stats['winrate']:.2f}% ({champ_stats['wins']}-{champ_stats['losses']})\n"
-            f"\n"
-            f"Global KDA:      {global_stats['kda_ratio']:.2f}\n"
-            f"Global Winrate:  {global_stats['winrate']:.2f}% ({global_stats['wins']}-{global_stats['losses']})\n"
-            f"```"
-        )
-        embed.description = description
-    
+
+        if detailed:
+            # DETAILED CHAMPION LAYOUT
+            global_stats = get_player_stats(player_id)
+            # FIXED: Correctly referenced 'champ_stats' instead of 'stats' for champion-specific data.
+            champ_data = {
+                f"--- Champion: {full_champion_name} ---": "",
+                "Winrate": f"{champ_stats['winrate']:.2f}% ({champ_stats['wins']}-{champ_stats['losses']})",
+                "KDA": f"{champ_stats['kda_ratio']:.2f} ({champ_stats['raw_k']}/{champ_stats['raw_d']}/{champ_stats['raw_a']})",
+                "Damage/Min": f"{int(champ_stats['damage_dealt_pm']):,}",
+                "Healing/Min": f"{int(champ_stats['healing_pm']):,}",
+                "Credits/Min": f"{int(champ_stats['credits_pm']):,}",
+                "AVG Damage Dealt": f"{int(champ_stats['avg_damage_dealt']):,}",
+                "AVG Damage Taken": f"{int(champ_stats['avg_damage_taken']):,}",
+                "AVG Healing": f"{int(champ_stats['avg_healing']):,}",
+                "AVG Shielding": f"{int(champ_stats['avg_shielding']):,}",
+                "AVG Credits": f"{int(champ_stats['avg_credits']):,}",
+                "AVG Objective Time": f"{int(champ_stats['obj_time']):,}",
+            }
+            global_data = {
+                "--- Global Stats ---": "",
+                "Global Winrate": f"{global_stats['winrate']:.2f}% ({global_stats['wins']}-{global_stats['losses']})",
+                "Global KDA": f"{global_stats['kda_ratio']:.2f}",
+            }
+            max_label_len = max(len(label) for label in list(champ_data.keys()) + list(global_data.keys()))
+            champ_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in champ_data.items()]
+            global_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in global_data.items()]
+            embed.description = "```\n" + "\n".join(champ_lines) + "\n\n" + "\n".join(global_lines) + "\n```"
+        else:
+            # STANDARD CHAMPION LAYOUT
+            global_stats = get_player_stats(player_id)
+            data = {
+                "Champion": full_champion_name,
+                "KDA": f"{champ_stats['kda_ratio']:.2f} ({champ_stats['raw_k']}/{champ_stats['raw_d']}/{champ_stats['raw_a']})",
+                "Winrate": f"{champ_stats['winrate']:.2f}% ({champ_stats['wins']}-{champ_stats['losses']})",
+                "": "", 
+                "Global KDA": f"{global_stats['kda_ratio']:.2f}",
+                "Global Winrate": f"{global_stats['winrate']:.2f}% ({global_stats['wins']}-{global_stats['losses']})",
+            }
+            max_label_len = max(len(label) for label in data.keys())
+            stat_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if label else "" for label, value in data.items()]
+            embed.description = "```\n" + "\n".join(stat_lines) + "\n```"
     else:
-        # --- GENERAL STATS LAYOUT ---
+        # --- GENERAL STATS ---
         stats = get_player_stats(player_id)
         if not stats or stats["games"] == 0:
             await ctx.send(f"No stats found for {target_user.display_name}.")
@@ -393,28 +424,47 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
         embed.title = f"Stats for {target_user.display_name}"
         embed.set_thumbnail(url=target_user.display_avatar.url)
 
-        # Build the description "black box"
-        description = (
-            f"```\n"
-            f"Winrate:           {stats['winrate']:.2f}% ({stats['wins']}-{stats['losses']})\n"
-            f"KDA:               {stats['kda_ratio']:.2f} ({stats['raw_k']}/{stats['raw_d']}/{stats['raw_a']})\n"
-            f"Damage/Min:        {int(stats['damage_dealt_pm']):,}\n"
-            f"Healing/Min:       {int(stats['healing_pm']):,}\n"
-            f"AVG Objective Time: {int(stats['obj_time']):,}\n"
-            f"```"
-        )
-        embed.description = description
+        if detailed:
+            # DETAILED GENERAL LAYOUT
+            data = {
+                "Winrate": f"{stats['winrate']:.2f}% ({stats['wins']}-{stats['losses']})",
+                "KDA": f"{stats['kda_ratio']:.2f} ({stats['raw_k']}/{stats['raw_d']}/{stats['raw_a']})",
+                "--- Per Minute ---": "",
+                "Damage/Min": f"{int(stats['damage_dealt_pm']):,}",
+                "Healing/Min": f"{int(stats['healing_pm']):,}",
+                "Credits/Min": f"{int(stats['credits_pm']):,}",
+                "--- Per Match ---": "",
+                "AVG Damage Dealt": f"{int(stats['avg_damage_dealt']):,}",
+                "AVG Damage Taken": f"{int(stats['avg_damage_taken']):,}",
+                "AVG Healing": f"{int(stats['avg_healing']):,}",
+                "AVG Shielding": f"{int(stats['avg_shielding']):,}",
+                "AVG Credits": f"{int(stats['avg_credits']):,}",
+                "AVG Objective Time": f"{int(stats['obj_time']):,}",
+            }
+            max_label_len = max(len(label) for label in data.keys())
+            stat_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in data.items()]
+            embed.description = "```\n" + "\n".join(stat_lines) + "\n```"
+        else:
+            # STANDARD GENERAL LAYOUT
+            data = {
+                "Winrate": f"{stats['winrate']:.2f}% ({stats['wins']}-{stats['losses']})",
+                "KDA": f"{stats['kda_ratio']:.2f} ({stats['raw_k']}/{stats['raw_d']}/{stats['raw_a']})",
+                "Damage/Min": f"{int(stats['damage_dealt_pm']):,}",
+                "Healing/Min": f"{int(stats['healing_pm']):,}",
+                "AVG Objective Time": f"{int(stats['obj_time']):,}"
+            }
+            max_label_len = max(len(label) for label in data.keys())
+            stat_lines = [f"{label + ':':<{max_label_len + 2}} {value}" for label, value in data.items()]
+            embed.description = "```\n" + "\n".join(stat_lines) + "\n```"
     
     # Set the footer
-    fetch_time = (datetime.datetime.now() - start_time).total_seconds() * 1000
+    fetch_time = (time.monotonic() - start_time) * 1000
     footer_text = f"Fetched in {fetch_time:.0f}ms"
-    if not champion: # Add Player ID only to the general stats page
+    if not champion:
         footer_text = f"Player ID: {target_user.id}  •  {footer_text}"
-
     embed.set_footer(text=footer_text, icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
 
     await ctx.send(embed=embed, file=icon_file)
-
 
 @bot.command(name="history", help="Shows the last 5 matches for a player.")
 async def history_cmd(ctx, user: PlayerConverter = None):

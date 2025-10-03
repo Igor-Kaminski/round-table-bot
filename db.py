@@ -438,6 +438,7 @@ def get_player_stats(player_id, champion=None):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
+        # ADDED: Now selects credits and taken damage
         query = """
             SELECT
                 ps.kills, ps.deaths, ps.assists, ps.damage, ps.objective_time,
@@ -445,14 +446,14 @@ def get_player_stats(player_id, champion=None):
                 CASE
                     WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1
                     ELSE 0
-                END AS win
+                END AS win,
+                ps.credits, ps.taken
             FROM player_stats ps
             JOIN matches m ON ps.match_id = m.match_id
             WHERE ps.player_id = ?
         """
         params = [player_id]
         if champion:
-            # Use an exact match for champion stats to be more precise
             query += " AND ps.champ = ?"
             params.append(champion)
 
@@ -461,13 +462,13 @@ def get_player_stats(player_id, champion=None):
         if not rows:
             return None
 
-        # Unpack summed columns
-        total_kills, total_deaths, total_assists, total_damage, total_obj_time, total_shielding, total_healing, total_time_in_minutes, total_wins = [sum(col) for col in zip(*rows)]
+        
+        total_kills, total_deaths, total_assists, total_damage, total_obj_time, total_shielding, total_healing, total_time_in_minutes, total_wins, total_credits, total_taken = [sum(col) for col in zip(*rows)]
         games_played = len(rows)
         total_losses = games_played - total_wins
         
         if total_time_in_minutes == 0:
-            total_time_in_minutes = 1 # Avoid division by zero
+            total_time_in_minutes = 1
 
         return {
             "games": games_played,
@@ -481,8 +482,13 @@ def get_player_stats(player_id, champion=None):
             "kda_ratio": round((total_kills + total_assists) / max(1, total_deaths), 2),
             "damage_dealt_pm": round(total_damage / total_time_in_minutes, 2),
             "healing_pm": round(total_healing / total_time_in_minutes, 2),
-            "shielding_pm": round(total_shielding / total_time_in_minutes, 2),
-            "obj_time": round(total_obj_time / games_played, 2), 
+            "credits_pm": round(total_credits / total_time_in_minutes, 2),
+            "obj_time": round(total_obj_time / games_played, 2),
+            "avg_damage_dealt": round(total_damage / games_played),
+            "avg_damage_taken": round(total_taken / games_played),
+            "avg_healing": round(total_healing / games_played),
+            "avg_shielding": round(total_shielding / games_played),
+            "avg_credits": round(total_credits / games_played),
         }
     finally:
         conn.close()
