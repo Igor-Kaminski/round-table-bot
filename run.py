@@ -772,6 +772,9 @@ async def leaderboard_cmd(ctx, *args):
     min_games = None 
     
     valid_roles = {role.lower() for role in CHAMPION_ROLES.values()}
+    # NEW: Alias mapping for roles.
+    role_aliases = {'dmg': 'damage'}
+    
     unprocessed_args = []
     args = list(args)
 
@@ -797,16 +800,26 @@ async def leaderboard_cmd(ctx, *args):
             unprocessed_args.append(arg)
         i += 1
 
+    # MODIFIED: This block now handles the 'dmg' alias.
     if unprocessed_args:
         full_filter_str = " ".join(unprocessed_args).lower()
-        if full_filter_str in valid_roles:
-            role_filter = full_filter_str.capitalize()
+        
+        matched_role = None
+        # First, check if the input is a specific alias like 'dmg'
+        if full_filter_str in role_aliases:
+            matched_role = role_aliases[full_filter_str]
         else:
+            # If not an alias, check if it's a partial match (e.g., 'suppo' for 'support')
+            matched_role = next((role for role in valid_roles if role.startswith(full_filter_str)), None)
+
+        if matched_role:
+            role_filter = matched_role.capitalize()
+        else:
+            # Otherwise, assume it's a champion filter
             champion_filter = full_filter_str
 
     limit = max(1, min(limit, 50))
     
-    # MODIFIED: Set default to 1 to include all players with at least one match.
     if min_games is None:
         min_games = 1
     
@@ -817,7 +830,8 @@ async def leaderboard_cmd(ctx, *args):
         champion=champion_filter, role=role_filter, min_games=min_games
     )
     if not leaderboard_data:
-        filter_msg = f" on {champion_filter.title()}" if champion_filter else f" as {role_filter}" if role_filter else ""
+        filter_name = champion_filter.title() if champion_filter else role_filter if role_filter else ""
+        filter_msg = f" as {filter_name}" if filter_name else ""
         await ctx.send(f"Could not generate a leaderboard for `{display_name}`{filter_msg}. No qualified player data found.")
         return
 
@@ -833,7 +847,6 @@ async def leaderboard_cmd(ctx, *args):
     embed_color = 0xE74C3C if show_bottom else 0x2ECC71
     embed = discord.Embed(title=embed_title, color=embed_color)
     
-    # MODIFIED: Only show the footer if a specific minimum games filter (>1) is active.
     if min_games > 1:
         embed.set_footer(text=f"Players must have at least {min_games} games with the specified filter to qualify.")
 
