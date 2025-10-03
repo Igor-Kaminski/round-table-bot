@@ -21,4 +21,4 @@
 ### 3. Running the Bot
 Once the setup is complete, you can start the bot by running the main Python script from your terminal:
 ```bash
-python bot.py
+python run.py
