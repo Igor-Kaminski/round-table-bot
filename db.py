@@ -643,8 +643,8 @@ CHAMPION_ROLES = {
     "Pip": "Support", "Rei": "Support", "Seris": "Support", "Ying": "Support",
 }
 
-def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None):
-    # This dictionary maps the simple stat_key to a complex SQL expression for aggregation.
+# MODIFIED: Default in signature updated to 1 for consistency.
+def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None, min_games=1):
     stat_expressions = {
         "winrate": "SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) * 100.0 / COUNT(ps.match_id)",
         "kda": "CAST(SUM(ps.kills) + SUM(ps.assists) AS REAL) / MAX(1, SUM(ps.deaths))",
@@ -667,10 +667,7 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
         return None
 
     order = "ASC" if show_bottom else "DESC"
-    # Use a lower game requirement for specific champion/role leaderboards
-    min_games = 1
 
-    # --- Dynamic Query Building ---
     params = []
     where_conditions = ["p.discord_id IS NOT NULL", "m.time > 0"]
 
@@ -680,7 +677,7 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
     elif role:
         champions_in_role = [c for c, r in CHAMPION_ROLES.items() if r == role]
         if not champions_in_role:
-            return None  # Role has no champions, so no results are possible
+            return None
         
         placeholders = ', '.join('?' for _ in champions_in_role)
         where_conditions.append(f"ps.champ IN ({placeholders})")
@@ -688,7 +685,6 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
 
     where_clause = " AND ".join(where_conditions)
     
-    # Final parameters list must be in the correct order for the query
     final_params = params + [min_games, limit]
 
     query = f"""

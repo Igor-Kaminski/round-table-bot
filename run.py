@@ -700,16 +700,18 @@ async def history_cmd(ctx, *args):
 
 
 # --- FULLY UPDATED HELP MESSAGE FOR LEADERBOARD ---
+# MODIFIED: Changed default min games to 1
 LEADERBOARD_HELP = """
 Shows player rankings, with optional filters for champions or roles.
 
-**Usage:** `!leaderboard [stat] [champion/role] [limit] [-b]`
+**Usage:** `!leaderboard [stat] [champion/role] [limit] [-b] [-m <games>]`
 
 **Arguments:**
 - `[stat]`: The statistic to rank by. Defaults to `winrate`.
 - `[champion/role]`: Filter by a champion name (e.g., `nando`) or a role (`tank`, `support`).
 - `[limit]`: The number of players to show. Defaults to `20`.
 - `[-b]`: Optional flag to show the bottom of the leaderboard.
+- `[-m <games>]`: Optional flag to set a minimum number of games played to qualify. Defaults to 1 (all players).
 
 **Available Stats:**
 - `winrate` (or `wr`): Overall Winrate
@@ -733,6 +735,7 @@ Shows player rankings, with optional filters for champions or roles.
 - `!lb kda fernando 10`: Top 10 KDA players on Fernando.
 - `!lb dmg support`: Top 20 damage dealers playing Support champions.
 - `!lb wr flank -b`: Bottom 20 winrate players on Flank champions.
+- `!lb wr -m 50`: Top 20 winrate players with at least 50 games played.
 """
 
 @bot.command(name="leaderboard", aliases=["lb"], help=LEADERBOARD_HELP)
@@ -761,18 +764,29 @@ async def leaderboard_cmd(ctx, *args):
     }
     
     # --- 1. Argument Parsing ---
-    stat_alias = "winrate"  # Default to winrate
+    stat_alias = "winrate"
     limit = 20
     show_bottom = False
     champion_filter = None
     role_filter = None
+    min_games = None 
     
     valid_roles = {role.lower() for role in CHAMPION_ROLES.values()}
     unprocessed_args = []
     args = list(args)
 
-    # First pass: handle flags and known types (stats, limits)
-    for arg in args:
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        
+        if arg.lower() == '-m':
+            if i + 1 < len(args) and args[i+1].isdigit():
+                min_games = max(1, int(args[i+1]))
+                i += 2
+                continue
+            i += 1
+            continue
+
         if arg.lower() == "-b":
             show_bottom = True
         elif arg.lower() in stat_map:
@@ -781,8 +795,8 @@ async def leaderboard_cmd(ctx, *args):
             limit = int(arg)
         else:
             unprocessed_args.append(arg)
+        i += 1
 
-    # Second pass: determine if the remaining args are a champion or role
     if unprocessed_args:
         full_filter_str = " ".join(unprocessed_args).lower()
         if full_filter_str in valid_roles:
@@ -792,11 +806,15 @@ async def leaderboard_cmd(ctx, *args):
 
     limit = max(1, min(limit, 50))
     
+    # MODIFIED: Set default to 1 to include all players with at least one match.
+    if min_games is None:
+        min_games = 1
+    
     # --- 2. Fetch Data ---
     display_name, data_key, formatter = stat_map[stat_alias]
     leaderboard_data = get_leaderboard(
-        data_key, limit, show_bottom, 
-        champion=champion_filter, role=role_filter
+        data_key, limit, show_bottom,  
+        champion=champion_filter, role=role_filter, min_games=min_games
     )
     if not leaderboard_data:
         filter_msg = f" on {champion_filter.title()}" if champion_filter else f" as {role_filter}" if role_filter else ""
@@ -806,9 +824,6 @@ async def leaderboard_cmd(ctx, *args):
     # --- 3. Build Embed ---
     filter_text = ""
     if champion_filter:
-        # To make it look nice, find the full champion name if possible
-        # This is an aesthetic improvement and can be removed if it causes issues
-        # Note: This simple lookup might not be perfect for all partial names
         full_champ_name = next((name for name in CHAMPION_ROLES if champion_filter.lower() in name.lower()), champion_filter)
         filter_text = f" on {full_champ_name.title()}"
     elif role_filter:
@@ -818,8 +833,9 @@ async def leaderboard_cmd(ctx, *args):
     embed_color = 0xE74C3C if show_bottom else 0x2ECC71
     embed = discord.Embed(title=embed_title, color=embed_color)
     
-    min_games_qualify = 5 if (champion_filter or role_filter) else 20
-    embed.set_footer(text=f"Players must have at least {min_games_qualify} games with the specified filter to qualify.")
+    # MODIFIED: Only show the footer if a specific minimum games filter (>1) is active.
+    if min_games > 1:
+        embed.set_footer(text=f"Players must have at least {min_games} games with the specified filter to qualify.")
 
     description = []
     for i, data_row in enumerate(leaderboard_data):
@@ -835,6 +851,7 @@ async def leaderboard_cmd(ctx, *args):
     
     embed.description = "\n".join(description)
     await ctx.send(embed=embed)
+
 
 @bot.command(name="compare", help="Compare stats between two players.")
 async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None):
