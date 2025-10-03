@@ -620,42 +620,80 @@ def get_match_history(player_id, limit: int = 30):
     finally:
         conn.close()
 
-def get_leaderboard(stat, limit):
-    # FIX: Removed '* 60' from queries as time is already in minutes.
-    queries = {
-        "damage": """
-            SELECT p.discord_id, p.player_ign, AVG(CAST(ps.damage AS REAL) / m.time) as value
-            FROM player_stats ps JOIN players p ON ps.player_id = p.player_id JOIN matches m ON ps.match_id = m.match_id
-            WHERE p.discord_id IS NOT NULL AND m.time > 0 GROUP BY p.discord_id ORDER BY value DESC LIMIT ?;
-        """,
-        "healing": """
-            SELECT p.discord_id, p.player_ign, AVG(CAST(ps.healing AS REAL) / m.time) as value
-            FROM player_stats ps JOIN players p ON ps.player_id = p.player_id JOIN matches m ON ps.match_id = m.match_id
-            WHERE p.discord_id IS NOT NULL AND m.time > 0 GROUP BY p.discord_id ORDER BY value DESC LIMIT ?;
-        """,
-        "obj_time": """
-            SELECT p.discord_id, p.player_ign, AVG(CAST(ps.objective_time AS REAL) / m.time) as value
-            FROM player_stats ps JOIN players p ON ps.player_id = p.player_id JOIN matches m ON ps.match_id = m.match_id
-            WHERE p.discord_id IS NOT NULL AND m.time > 0 GROUP BY p.discord_id ORDER BY value DESC LIMIT ?;
-        """,
-        "kda": """
-            SELECT p.discord_id, p.player_ign, CAST(SUM(ps.kills) + SUM(ps.assists) AS REAL) / MAX(1, SUM(ps.deaths)) as value
-            FROM player_stats ps JOIN players p ON ps.player_id = p.player_id
-            WHERE p.discord_id IS NOT NULL GROUP BY p.discord_id HAVING COUNT(ps.match_id) >= 10 ORDER BY value DESC LIMIT ?;
-        """,
-        "winrate": """
-            SELECT p.discord_id, p.player_ign,
-                   SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) * 100.0 / COUNT(ps.match_id) as value
-            FROM player_stats ps JOIN players p ON ps.player_id = p.player_id JOIN matches m ON ps.match_id = m.match_id
-            WHERE p.discord_id IS NOT NULL GROUP BY p.discord_id HAVING COUNT(ps.match_id) >= 10 ORDER BY value DESC LIMIT ?;
-        """
+def get_leaderboard(stat_key, limit, show_bottom=False):
+    # This dictionary maps the simple stat_key to a complex SQL expression for aggregation.
+    # This is the safest way to build dynamic queries, preventing SQL injection.
+    stat_expressions = {
+        "winrate": "SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) * 100.0 / COUNT(ps.match_id)",
+        "kda": "CAST(SUM(ps.kills) + SUM(ps.assists) AS REAL) / MAX(1, SUM(ps.deaths))",
+        "damage_dealt_pm": "SUM(CAST(ps.damage AS REAL)) / SUM(m.time)",
+        "damage_taken_pm": "SUM(CAST(ps.taken AS REAL)) / SUM(m.time)",
+        "healing_pm": "SUM(CAST(ps.healing AS REAL)) / SUM(m.time)",
+        "self_healing_pm": "SUM(CAST(ps.self_healing AS REAL)) / SUM(m.time)",
+        "credits_pm": "SUM(CAST(ps.credits AS REAL)) / SUM(m.time)",
+        "avg_damage_dealt": "AVG(ps.damage)",
+        "avg_damage_taken": "AVG(ps.taken)",
+        "damage_delta": "AVG(ps.damage - ps.taken)",
+        "avg_healing": "AVG(ps.healing)",
+        "avg_self_healing": "AVG(ps.self_healing)",
+        "avg_shielding": "AVG(ps.shielding)",
+        "avg_credits": "AVG(ps.credits)",
+        "obj_time": "AVG(ps.objective_time)",
     }
-    if stat not in queries: return None
+
+    if stat_key not in stat_expressions:
+        return None
+
+    # Determine sorting order
+    order = "ASC" if show_bottom else "DESC"
+    # Set minimum games requirement for certain stats
+    min_games = 20 if stat_key in ["winrate", "kda"] else 1
+
+    # The main SQL query template
+    query = f"""
+        WITH PlayerAggregates AS (
+            SELECT
+                p.discord_id,
+                p.player_ign,
+                COUNT(ps.match_id) AS games_played,
+                SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) as wins,
+                SUM(ps.kills) as total_k,
+                SUM(ps.deaths) as total_d,
+                SUM(ps.assists) as total_a,
+                ({stat_expressions[stat_key]}) AS value
+            FROM player_stats ps
+            JOIN players p ON ps.player_id = p.player_id
+            JOIN matches m ON ps.match_id = m.match_id
+            WHERE p.discord_id IS NOT NULL AND m.time > 0
+            GROUP BY p.discord_id
+            HAVING games_played >= ?
+        )
+        SELECT
+            pa.discord_id,
+            pa.player_ign,
+            pa.value,
+            pa.wins,
+            (pa.games_played - pa.wins) AS losses,
+            pa.total_k as k,
+            pa.total_d as d,
+            pa.total_a as a,
+            (SELECT COUNT(*) FROM PlayerAggregates) as total_players
+        FROM PlayerAggregates pa
+        ORDER BY pa.value {order}, pa.games_played DESC
+        LIMIT ?;
+    """
+
     conn = sqlite3.connect("match_data.db")
+    # This makes the cursor return dict-like rows
+    conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        cursor.execute(queries[stat], (limit,))
-        return cursor.fetchall()
+        cursor.execute(query, (min_games, limit))
+        # Convert rows to standard dictionaries
+        return [dict(row) for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        print(f"Database error in get_leaderboard: {e}")
+        return None
     finally:
         conn.close()
 
