@@ -501,8 +501,8 @@ class TopChampsView(View):
         sorted_data = sorted(filtered_data, key=lambda x: x[self.current_sort_key], reverse=True)
 
         lines = []
-        # FIXED: Added trailing spaces to this line to increase the width of the code block.
-        header = f"{'Champion':<16}{'KDA':>6}{'WR':>8}{'Matches':>8}{'Time':>10}      "
+        # CHANGED: All columns are now left-aligned (<) with new widths to create spacing.
+        header = f"{'Champion':<16}{'KDA':<8}{'WR':<9}{'Matches':<10}{'Time'}"
         separator = "-" * len(header)
         
         roles_to_display = [self.current_role_filter] if self.current_role_filter else ["Damage", "Flank", "Tank", "Support"]
@@ -518,15 +518,15 @@ class TopChampsView(View):
             
             for i, champ in enumerate(champs_in_role, 1):
                 name = champ['champ']
-                if len(name) > 13:
-                    name = name[:12] + "…"
+                if len(name) > 12:
+                    name = name[:11] + "…"
                 kda, wr, matches, time_played = f"{champ['kda_ratio']:.2f}", f"{champ['winrate']:.1f}%", str(champ['games']), champ['time_played']
-                lines.append(f"{str(i)+'.':<4}{name:<12}{kda:>6}{wr:>8}{matches:>8}{time_played:>10}")
+                
+                # CHANGED: Data rows now match the header's left-alignment and spacing.
+                lines.append(f"{str(i)+'.':<4}{name:<12}{kda:<8}{wr:<9}{matches:<10}{time_played}")
             lines.append("")
         
         return "```\n" + "\n".join(lines) + "\n```"
-
-
 
 
 
@@ -653,19 +653,21 @@ async def history_cmd(ctx, *args):
             user_input_parts = args[:-1]
         else:
             user_input_parts = args
-    
+
     if user_input_parts:
         try:
             target_user = await PlayerConverter().convert(ctx, " ".join(user_input_parts))
         except commands.BadArgument as e:
             await ctx.send(e)
             return
-            
+
     limit = max(1, min(limit, 50))
 
     player_id = get_player_id(str(target_user.id))
     if not player_id:
-        await ctx.send(f"No history found for {target_user.display_name}. They may need to link their IGN using `!link <ign>`.")
+        await ctx.send(
+            f"No history found for {target_user.display_name}. They may need to link their IGN using `!link <ign>`."
+        )
         return
 
     history = get_match_history(player_id, limit)
@@ -673,74 +675,145 @@ async def history_cmd(ctx, *args):
         await ctx.send(f"No match history found for {target_user.display_name}.")
         return
 
-    embed = discord.Embed(
-        title=f"Last {len(history)} Matches for {target_user.display_name}",
-        color=discord.Color.green()
-    )
-    embed.set_thumbnail(url=target_user.display_avatar.url)
-
-    header = f"  {'CHAMPION':<12} {'TIME':<7} {'MATCH ID':<10} {'KDA':>5} {'RAW KDA':<12} MAP"
-    separator = "─" * (len(header) + 4)
-    lines = [header, separator]
+    # Header - Changed "Result" to "W/L" and adjusted padding
+    header = f"{'W/L':<5} {'Champion':<16} {'Time':<6} {'Match ID':<10} {'KDA':<6} {'Raw KDA':<11} {'Map':<20}"
+    lines = [header]
 
     for match in history:
         map_name, champ, k, d, a, result, match_id, match_time = match
-        
-        emoji = "🏆" if result == "W" else "💔"
+
+        symbol = "🏆" if result == "W" else "💔"
         kda_ratio = f"{(k + a) / max(1, d):.2f}"
         time_str = f"{match_time}:00"
         raw_kda_str = f"({k}/{d}/{a})"
-        champ_str = (champ[:11] + '…') if len(champ) > 12 else champ
-        
-        line = f"{emoji} {champ_str:<12} {time_str:<7} {match_id:<10} {kda_ratio:>5} {raw_kda_str:<12} {map_name}"
+
+        # Truncate long names
+        champ_str = champ if len(champ) <= 16 else champ[:15] + "…"
+        map_str = map_name if len(map_name) <= 20 else map_name[:19] + "…"
+
+        # Data Row - Adjusted padding to match the new header
+        line = f"{symbol:<4} {champ_str:<16} {time_str:<6} {match_id:<10} {kda_ratio:<6} {raw_kda_str:<11} {map_str:<20}"
         lines.append(line)
 
-    embed.description = "```\n" + "\n".join(lines) + "\n```"
-    await ctx.send(embed=embed)
+    # Final message
+    output = f"Last {len(history)} Matches for {target_user.display_name}\n\n" + "\n".join(lines)
+    await ctx.send(f"```diff\n{output}\n```")
 
-@bot.command(name="leaderboard", aliases=['lb'], help="Shows the top players for a given stat.")
-async def leaderboard_cmd(ctx, stat: str, limit: int = 10):
-    valid_stats = ["damage", "healing", "kda", "winrate", "obj_time"]
-    if stat.lower() not in valid_stats:
-        await ctx.send(f"Invalid stat. Please choose from: `{', '.join(valid_stats)}`.")
-        return
-    
-    if not 1 <= limit <= 20:
-        await ctx.send("Limit must be between 1 and 20.")
-        return
 
-    leaderboard_data = get_leaderboard(stat.lower(), limit)
-    if not leaderboard_data:
-        await ctx.send(f"Could not generate a leaderboard for `{stat}`. Not enough data may be available.")
-        return
+# --- DETAILED HELP MESSAGE FOR LEADERBOARD ---
+LEADERBOARD_HELP = """
+Shows player rankings for various stats.
 
-    stat_name_map = {
-        "damage": "Damage/min", "healing": "Healing/min", "kda": "KDA Ratio",
-        "winrate": "Winrate", "obj_time": "Objective Time/min"
+**Usage:** `!leaderboard [stat] [limit] [-b]`
+
+**Arguments:**
+- `[stat]`: The statistic to rank by. Defaults to `winrate`.
+- `[limit]`: The number of players to show. Defaults to `20`.
+- `[-b]`: Optional flag to show the bottom of the leaderboard instead of the top.
+
+**Available Stats:**
+- `winrate` (or `wr`): Overall Winrate
+- `kda`: Kill/Death/Assist Ratio
+- `dmg` (or `dpm`): Damage per Minute
+- `taken_pm`: Damage Taken per Minute
+- `heal_pm`: Healing per Minute
+- `self_heal_pm`: Self Healing per Minute
+- `creds_pm`: Credits per Minute
+- `avg_dmg`: Average Damage per Match
+- `avg_taken`: Average Damage Taken per Match
+- `delta`: Average Damage Delta (Dealt - Taken)
+- `avg_heal`: Average Healing per Match
+- `avg_self_heal`: Average Self Healing per Match
+- `avg_shield`: Average Shielding per Match
+- `avg_creds`: Average Credits per Match
+- `obj_time`: Average Objective Time per Match
+
+**Examples:**
+- `!lb`: Shows the top 20 players by Winrate.
+- `!lb kda 10`: Shows the top 10 players by KDA.
+- `!lb dmg`: Shows the top 20 players by Damage/Min.
+- `!lb obj_time 5 -b`: Shows the bottom 5 players for Objective Time.
+"""
+
+@bot.command(name="leaderboard", aliases=["lb"], help=LEADERBOARD_HELP)
+async def leaderboard_cmd(ctx, *args):
+    # --- Stat Mapping (defined inside the function as requested) ---
+    # Maps user aliases to: (Display Name, data_key_for_db_function, formatting_function)
+    stat_map = {
+        "winrate": ("Winrate", "winrate", lambda v, s: f"{v:.2f}% ({s['wins']}-{s['losses']})"),
+        "kda": ("KDA Ratio", "kda", lambda v, s: f"{v:.2f} ({s['k']}/{s['d']}/{s['a']})"),
+        "dmg_pm": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
+        "taken_pm": ("Damage Taken/Min", "damage_taken_pm", lambda v, s: f"{int(v):,}"),
+        "heal_pm": ("Healing/Min", "healing_pm", lambda v, s: f"{int(v):,}"),
+        "self_heal_pm": ("Self Healing/Min", "self_healing_pm", lambda v, s: f"{int(v):,}"),
+        "creds_pm": ("Credits/Min", "credits_pm", lambda v, s: f"{int(v):,}"),
+        "avg_dmg": ("AVG Damage Dealt", "avg_damage_dealt", lambda v, s: f"{int(v):,}"),
+        "avg_taken": ("AVG Damage Taken", "avg_damage_taken", lambda v, s: f"{int(v):,}"),
+        "delta": ("AVG Damage Delta", "damage_delta", lambda v, s: f"{int(v):,}"),
+        "avg_heal": ("AVG Healing", "avg_healing", lambda v, s: f"{int(v):,}"),
+        "avg_self_heal": ("AVG Self Healing", "avg_self_healing", lambda v, s: f"{int(v):,}"),
+        "avg_shield": ("AVG Shielding", "avg_shielding", lambda v, s: f"{int(v):,}"),
+        "avg_creds": ("AVG Credits", "avg_credits", lambda v, s: f"{int(v):,}"),
+        "obj_time": ("AVG Objective Time", "obj_time", lambda v, s: f"{int(v):,}s"),
+        # Convenience aliases
+        "dmg": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
+        "dpm": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
+        "wr": ("Winrate", "winrate", lambda v, s: f"{v:.2f}% ({s['wins']}-{s['losses']})"),
     }
-    embed_title = f"🏆 Top {len(leaderboard_data)} Players by {stat_name_map[stat.lower()]}"
-    if stat.lower() in ["kda", "winrate"]:
-        embed_title += " (min. 10 games)"
-    embed = discord.Embed(title=embed_title, color=discord.Color.gold())
+
+    # --- 1. Argument Parsing ---
+    stat_alias = "winrate"
+    limit = 20
+    show_bottom = False
+    args = list(args)
+
+    if "-b" in args:
+        show_bottom = True
+        args.remove("-b")
+
+    if args:
+        stat_alias = args.pop(0).lower()
+    if args and args[0].isdigit():
+        limit = int(args.pop(0))
+
+    limit = max(1, min(limit, 50))
+    
+    # --- 2. Validate Stat ---
+    if stat_alias not in stat_map:
+        valid_stats = ", ".join(f"`{s}`" for s in sorted(stat_map.keys()) if len(s) > 2)
+        await ctx.send(f"Invalid stat. Please choose from: {valid_stats}")
+        return
+
+    display_name, data_key, formatter = stat_map[stat_alias]
+
+    # --- 3. Fetch Data ---
+    leaderboard_data = get_leaderboard(data_key, limit, show_bottom)
+    if not leaderboard_data:
+        await ctx.send(f"Could not generate a leaderboard for `{display_name}`. Not enough qualified player data may be available.")
+        return
+
+    # --- 4. Build Embed ---
+    embed_title = f"🏆 {'Bottom' if show_bottom else 'Top'} {len(leaderboard_data)} Players by {display_name}"
+    embed_color = 0xE74C3C if show_bottom else 0x2ECC71
+    embed = discord.Embed(title=embed_title, color=embed_color)
+    embed.set_footer(text="Players must have at least 20 games to qualify for most leaderboards.")
 
     description = []
-    for i, (discord_id, ign, value) in enumerate(leaderboard_data):
-        member = ctx.guild.get_member(int(discord_id))
-        name = member.display_name if member else ign
-        
-        if stat.lower() == 'winrate':
-            formatted_value = f"{value:.1f}%"
-        elif stat.lower() == 'kda':
-            formatted_value = f"{value:.2f}"
-        else:
-            formatted_value = f"{int(value):,}"
+    for i, data_row in enumerate(leaderboard_data):
+        discord_id = data_row['discord_id']
+        value = data_row['value']
 
-        description.append(f"`{i+1:2}.` **{name}** - {formatted_value}")
+        member = ctx.guild.get_member(int(discord_id))
+        # --- THIS IS THE CORRECTED LINE ---
+        name = member.display_name if member else data_row['player_ign']
+        
+        rank = (data_row['total_players'] - i) if show_bottom else (i + 1)
+        formatted_value = formatter(value, data_row)
+
+        description.append(f"`{rank:2}.` **{name}** - {formatted_value}")
     
     embed.description = "\n".join(description)
     await ctx.send(embed=embed)
-
-
 
 # RENAMED: The old !top_champs command is now legacy
 @bot.command(name="legacy_top_champs", help="[LEGACY] Get top 5 champs for a player (non-interactive).", hidden=True)
@@ -772,12 +845,14 @@ async def legacy_top_champs_cmd(ctx, user: PlayerConverter = None):
 
 @bot.command(name="compare", help="Compare stats between two players.")
 async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None):
-    target_user2 = user2 or ctx.author
-    if user1 == target_user2:
+    # If user2 is not provided, default to the command author
+    user2 = user2 or ctx.author
+
+    if user1 == user2:
         await ctx.send("You can't compare a player to themselves!")
         return
         
-    result = compare_players(str(user1.id), str(target_user2.id))
+    result = compare_players(str(user1.id), str(user2.id))
     if not result:
         await ctx.send("Could not find stats for one or both players. Ensure they have linked their IGNs.")
         return
@@ -785,37 +860,86 @@ async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None
     p1_stats = result["player1"]
     p2_stats = result["player2"]
 
-    embed = discord.Embed(title=f"Comparison: {user1.display_name} vs {target_user2.display_name}", color=0x2ECC71)
-    
-    p1_value = (
-        f"**Games:** {p1_stats['games']} | **Winrate:** {p1_stats['winrate']}%\n"
-        f"**KDA Ratio:** {p1_stats['kda_ratio']} | **Dmg/min:** {int(p1_stats['damage_dealt_pm']):,}\n"
+    # --- Create the Embed ---
+    embed = discord.Embed(
+        title=f"Head-to-Head: {user1.name} vs {user2.name}",
+        description="Here's how their stats stack up.",
+        color=0x3498DB
     )
-    p1_value += "**Top Champion:**\n"
+    # CORRECTED LINE: Use .display_avatar.url instead of .avatar_url
+    embed.set_author(name=user1.display_name, icon_url=user1.display_avatar.url)
+    
+    # CORRECTED LINE: Use .display_avatar.url instead of .avatar_url
+    embed.set_footer(text=f"Compared with {user2.display_name}", icon_url=user2.display_avatar.url)
+
+    # --- Helper logic for adding winner emojis ---
+    def get_emoji(stat1, stat2):
+        if stat1 > stat2:
+            return "👑", ""
+        elif stat2 > stat1:
+            return "", "👑"
+        else:
+            return "🤝", "🤝"
+
+    wr_e1, wr_e2 = get_emoji(p1_stats['winrate'], p2_stats['winrate'])
+    kda_e1, kda_e2 = get_emoji(p1_stats['kda_ratio'], p2_stats['kda_ratio'])
+    dmg_e1, dmg_e2 = get_emoji(p1_stats['damage_dealt_pm'], p2_stats['damage_dealt_pm'])
+
+    # --- Stat-by-Stat Comparison Fields ---
+    embed.add_field(
+        name="📊 Winrate & Games Played",
+        value=(
+            f"{wr_e1} `{user1.display_name}`: **{p1_stats['winrate']:.2f}%** ({p1_stats['games']} games)\n"
+            f"{wr_e2} `{user2.display_name}`: **{p2_stats['winrate']:.2f}%** ({p2_stats['games']} games)"
+        ),
+        inline=False
+    )
+    embed.add_field(
+        name="⚔️ KDA Ratio",
+        value=(
+            f"{kda_e1} `{user1.display_name}`: **{p1_stats['kda_ratio']:.2f}**\n"
+            f"{kda_e2} `{user2.display_name}`: **{p2_stats['kda_ratio']:.2f}**"
+        ),
+        inline=True
+    )
+    embed.add_field(
+        name="💥 Damage per Minute",
+        value=(
+            f"{dmg_e1} `{user1.display_name}`: **{int(p1_stats['damage_dealt_pm']):,}**\n"
+            f"{dmg_e2} `{user2.display_name}`: **{int(p2_stats['damage_dealt_pm']):,}**"
+        ),
+        inline=True
+    )
+    
+    # --- Top Champions ---
+    p1_top_champ_str = "N/A"
     if result['top_champs1']:
         top_champ = result['top_champs1'][0]
-        p1_value += f"• {top_champ['champ']} ({top_champ['winrate']}% WR in {top_champ['games']} games)"
-    else:
-        p1_value += "N/A"
-    embed.add_field(name=user1.display_name, value=p1_value, inline=True)
+        p1_top_champ_str = f"**{top_champ['champ']}** ({top_champ['winrate']:.1f}% WR over {top_champ['games']} games)"
 
-    p2_value = (
-        f"**Games:** {p2_stats['games']} | **Winrate:** {p2_stats['winrate']}%\n"
-        f"**KDA Ratio:** {p2_stats['kda_ratio']} | **Dmg/min:** {int(p2_stats['damage_dealt_pm']):,}\n"
-    )
-    p2_value += "**Top Champion:**\n"
+    p2_top_champ_str = "N/A"
     if result['top_champs2']:
         top_champ = result['top_champs2'][0]
-        p2_value += f"• {top_champ['champ']} ({top_champ['winrate']}% WR in {top_champ['games']} games)"
-    else:
-        p2_value += "N/A"
-    embed.add_field(name=target_user2.display_name, value=p2_value, inline=True)
-    
-    synergy_value = (
-        f"**Together:** {result['with_winrate']}% WR ({result['with_games']} games)\n"
-        f"**Against:** {result['against_winrate']}% WR ({result['against_games']} games for {user1.display_name})"
+        p2_top_champ_str = f"**{top_champ['champ']}** ({top_champ['winrate']:.1f}% WR over {top_champ['games']} games)"
+
+    embed.add_field(
+        name="🏆 Top Champion",
+        value=(
+            f"`{user1.display_name}`: {p1_top_champ_str}\n"
+            f"`{user2.display_name}`: {p2_top_champ_str}"
+        ),
+        inline=False
     )
-    embed.add_field(name="Synergy", value=synergy_value, inline=False)
+
+    # --- Synergy Section (with clearer explanation) ---
+    embed.add_field(
+        name="🤝 Synergy & Rivalry",
+        value=(
+            f"**Playing Together:** `{result['with_games']}` games with a **{result['with_winrate']:.1f}%** winrate.\n"
+            f"**Playing Against:** When matched up, `{user1.display_name}` wins **{result['against_winrate']:.1f}%** of the time across `{result['against_games']}` games."
+        ),
+        inline=False
+    )
     
     await ctx.send(embed=embed)
 
