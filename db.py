@@ -438,7 +438,7 @@ def get_player_stats(player_id, champion=None):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
-        # ADDED: Now selects credits and taken damage
+        # ADDED: Now selects self_healing
         query = """
             SELECT
                 ps.kills, ps.deaths, ps.assists, ps.damage, ps.objective_time,
@@ -447,7 +447,7 @@ def get_player_stats(player_id, champion=None):
                     WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1
                     ELSE 0
                 END AS win,
-                ps.credits, ps.taken
+                ps.credits, ps.taken, ps.self_healing
             FROM player_stats ps
             JOIN matches m ON ps.match_id = m.match_id
             WHERE ps.player_id = ?
@@ -462,8 +462,8 @@ def get_player_stats(player_id, champion=None):
         if not rows:
             return None
 
-        
-        total_kills, total_deaths, total_assists, total_damage, total_obj_time, total_shielding, total_healing, total_time_in_minutes, total_wins, total_credits, total_taken = [sum(col) for col in zip(*rows)]
+        # ADDED: Unpacks total_self_healing
+        total_kills, total_deaths, total_assists, total_damage, total_obj_time, total_shielding, total_healing, total_time_in_minutes, total_wins, total_credits, total_taken, total_self_healing = [sum(col) for col in zip(*rows)]
         games_played = len(rows)
         total_losses = games_played - total_wins
         
@@ -489,10 +489,13 @@ def get_player_stats(player_id, champion=None):
             "avg_healing": round(total_healing / games_played),
             "avg_shielding": round(total_shielding / games_played),
             "avg_credits": round(total_credits / games_played),
+            "self_healing_pm": round(total_self_healing / total_time_in_minutes, 2),
+            "damage_taken_pm": round(total_taken / total_time_in_minutes, 2),
+            "avg_self_healing": round(total_self_healing / games_played),
+            "damage_delta": round((total_damage - total_taken) / games_played),
         }
     finally:
         conn.close()
-
 
 
 
@@ -593,23 +596,26 @@ def compare_players(discord_id1, discord_id2):
         "against_winrate": against_winrate, "against_games": against_games,
     }
 
-def get_match_history(player_id):
+def get_match_history(player_id, limit: int = 30):
+    """Fetches a variable number of recent matches for a player."""
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
+        # UPDATED: The LIMIT is now a parameter
         cursor.execute("""
             SELECT
                 m.map, ps.champ, ps.kills, ps.deaths, ps.assists,
                 CASE
                     WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 'W'
                     ELSE 'L'
-                END as result
+                END as result,
+                m.match_id, m.time
             FROM player_stats ps
             JOIN matches m ON ps.match_id = m.match_id
             WHERE ps.player_id = ?
             ORDER BY ps.player_stats_id DESC
-            LIMIT 5;
-        """, (player_id,))
+            LIMIT ?;
+        """, (player_id, limit))
         return cursor.fetchall()
     finally:
         conn.close()
@@ -737,3 +743,40 @@ def get_champion_name(player_id, partial_name):
     conn.close()
     return result[0] if result else None
 
+
+
+def get_all_champion_stats(player_id):
+    """NEW: Fetches stats for all champions played by a user."""
+    conn = sqlite3.connect("match_data.db")
+    cursor = conn.cursor()
+    cursor.execute(
+        """
+        SELECT
+            champ,
+            COUNT(*) as games,
+            SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) as wins,
+            SUM(kills), SUM(deaths), SUM(assists),
+            SUM(m.time) as total_minutes
+        FROM player_stats ps
+        JOIN matches m ON ps.match_id = m.match_id
+        WHERE player_id = ?
+        GROUP BY champ
+        """,
+        (player_id,),
+    )
+    rows = cursor.fetchall()
+    champs = []
+    for row in rows:
+        champ, games, wins, kills, deaths, assists, total_minutes = row
+        
+        # FIXED: Added the 'time_played' key back to the dictionary
+        champ_stats = {
+            "champ": champ,
+            "games": games,
+            "winrate": round(100 * wins / games, 2) if games else 0,
+            "kda_ratio": round((kills + assists) / max(1, deaths), 2),
+            "time_played": f"{total_minutes // 60}h {total_minutes % 60}m" # Format as Hh Mm
+        }
+        champs.append(champ_stats)
+    conn.close()
+    return champs

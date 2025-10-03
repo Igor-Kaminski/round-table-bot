@@ -4,7 +4,7 @@ import os
 import dotenv
 import re
 import time
-from discord.ui import View, Button, Modal, TextInput
+from discord.ui import View, Button, Modal, TextInput, Select
 from db import (
     create_database,
     insert_scoreboard,
@@ -31,7 +31,8 @@ from db import (
     get_leaderboard,
     get_old_stats,
     get_discord_id_for_ign,
-    get_champion_name, 
+    get_champion_name,
+    get_all_champion_stats,
 )
 import csv
 import io
@@ -48,6 +49,27 @@ GUILD_ID = int(os.getenv("GUILD_ID"))
 BOT_PERMISSION_ROLE_NAMES = ["Executive", "Bot Access"]
 BOT_PERMISSION_USER_IDS = [163861584379248651]  # Nick
 ALLOWED_CHANNELS = ["match-results", "admin"]  # Define allowed channels
+
+CHAMPION_ROLES = {
+    # Damage
+    "Bomb King": "Damage", "Cassie": "Damage", "Dredge": "Damage", "Drogoz": "Damage",
+    "Imani": "Damage", "Kinessa": "Damage", "Lian": "Damage", "Octavia": "Damage",
+    "Saati": "Damage", "Sha Lin": "Damage", "Strix": "Damage", "Tiberius": "Damage",
+    "Tyra": "Damage", "Viktor": "Damage", "Willo": "Damage", "Betty la Bomba": "Damage",
+    # Flank
+    "Androxus": "Flank", "Buck": "Flank", "Caspian": "Flank", "Evie": "Flank",
+    "Koga": "Flank", "Lex": "Flank", "Maeve": "Flank", "Moji": "Flank",
+    "Skye": "Flank", "Talus": "Flank", "Vatu": "Flank", "Vora": "Flank",
+    "VII": "Flank", "Zhin": "Flank",
+    # Tank
+    "Ash": "Tank", "Atlas": "Tank", "Azaan": "Tank", "Barik": "Tank", "Fernando": "Tank",
+    "Inara": "Tank", "Khan": "Tank", "Makoa": "Tank", "Raum": "Tank", "Ruckus": "Tank",
+    "Terminus": "Tank", "Torvald": "Tank", "Yagorath": "Tank", "Nyx": "Tank", "Omen": "Tank",
+    # Support
+    "Corvus": "Support", "Furia": "Support", "Ghrok": "Support", "Grover": "Support",
+    "Io": "Support", "Jenos": "Support", "Lillith": "Support", "Mal'Damba": "Support",
+    "Pip": "Support", "Rei": "Support", "Seris": "Support", "Ying": "Support",
+}
 
 
 @bot.event
@@ -80,6 +102,8 @@ def get_champion_icon_path(champion_name):
     # This assumes your icon files are named like 'androxus.png', 'sha_lin.png', etc.
     # and are located in 'icons/champ_icons/'
     return os.path.join("icons", "champ_icons", f"{formatted_name}.png")
+
+
 
 
 # FINAL VERSION: This converter now handles all cases:
@@ -335,18 +359,11 @@ async def link(ctx, ign: str):
         await ctx.send("An error occurred while linking your account.")
 
 
-@bot.command(name="stats", help="Get stats for a player. Use '-d' for a detailed view.")
+@bot.command(name="stats", help="Get detailed stats for a player, with an optional champion filter.")
 async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
     start_time = time.monotonic()
     target_user = user or ctx.author
     
-    detailed = False
-    if champion and '-d' in champion.lower():
-        detailed = True
-        champion = re.sub(r'\s*-d\s*', '', champion, flags=re.IGNORECASE).strip()
-        if not champion:
-            champion = None
-
     player_id = get_player_id(str(target_user.id))
     if not player_id:
         await ctx.send(f"No stats found for {target_user.display_name}. They may need to link their IGN using `!link <ign>`.")
@@ -356,7 +373,7 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
     embed = discord.Embed(color=discord.Color.blue())
 
     if champion:
-        # --- CHAMPION-SPECIFIC STATS ---
+        # --- CHAMPION-SPECIFIC STATS LAYOUT ---
         full_champion_name = get_champion_name(player_id, champion)
         if not full_champion_name:
             await ctx.send(f"No stats found for {target_user.display_name} on a champion matching '{champion}'.")
@@ -367,55 +384,47 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
             await ctx.send(f"No stats found for {target_user.display_name} on {full_champion_name}.")
             return
 
+        global_stats = get_player_stats(player_id)
+
         embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=target_user.display_avatar.url)
         icon_path = get_champion_icon_path(full_champion_name)
         if os.path.exists(icon_path):
             icon_file = discord.File(icon_path, filename="icon.png")
             embed.set_thumbnail(url="attachment://icon.png")
+        
+        # FIXED: Corrected all variables to use 'champ_stats' instead of 'stats'
+        champ_data = {
+            f"--- Champion: {full_champion_name} ---": "",
+            "Winrate": f"{champ_stats['winrate']:.2f}% ({champ_stats['wins']}-{champ_stats['losses']})",
+            "KDA": f"{champ_stats['kda_ratio']:.2f} ({champ_stats['raw_k']}/{champ_stats['raw_d']}/{champ_stats['raw_a']})",
+            "Damage/Min": f"{int(champ_stats['damage_dealt_pm']):,}",
+            "Damage Taken/Min": f"{int(champ_stats['damage_taken_pm']):,}",
+            "Healing/Min": f"{int(champ_stats['healing_pm']):,}",
+            "Self Healing/Min": f"{int(champ_stats['self_healing_pm']):,}",
+            "Credits/Min": f"{int(champ_stats['credits_pm']):,}",
+            "AVG Damage Dealt": f"{int(champ_stats['avg_damage_dealt']):,}",
+            "AVG Damage Taken": f"{int(champ_stats['avg_damage_taken']):,}",
+            "AVG Damage Delta": f"{int(champ_stats['damage_delta']):,}",
+            "AVG Healing": f"{int(champ_stats['avg_healing']):,}",
+            "AVG Self Healing": f"{int(champ_stats['avg_self_healing']):,}",
+            "AVG Shielding": f"{int(champ_stats['avg_shielding']):,}",
+            "AVG Credits": f"{int(champ_stats['avg_credits']):,}",
+            "AVG Objective Time": f"{int(champ_stats['obj_time']):,}",
+        }
+        global_data = {
+            "--- Global Stats ---": "",
+            "Global Winrate": f"{global_stats['winrate']:.2f}% ({global_stats['wins']}-{global_stats['losses']})",
+            "Global KDA": f"{global_stats['kda_ratio']:.2f}",
+        }
+        max_label_len = max(len(label) for label in list(champ_data.keys()) + list(global_data.keys()))
+        
+        champ_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in champ_data.items()]
+        global_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in global_data.items()]
+        
+        embed.description = "```\n" + "\n".join(champ_lines) + "\n\n" + "\n".join(global_lines) + "\n```"
 
-        if detailed:
-            # DETAILED CHAMPION LAYOUT
-            global_stats = get_player_stats(player_id)
-            # FIXED: Correctly referenced 'champ_stats' instead of 'stats' for champion-specific data.
-            champ_data = {
-                f"--- Champion: {full_champion_name} ---": "",
-                "Winrate": f"{champ_stats['winrate']:.2f}% ({champ_stats['wins']}-{champ_stats['losses']})",
-                "KDA": f"{champ_stats['kda_ratio']:.2f} ({champ_stats['raw_k']}/{champ_stats['raw_d']}/{champ_stats['raw_a']})",
-                "Damage/Min": f"{int(champ_stats['damage_dealt_pm']):,}",
-                "Healing/Min": f"{int(champ_stats['healing_pm']):,}",
-                "Credits/Min": f"{int(champ_stats['credits_pm']):,}",
-                "AVG Damage Dealt": f"{int(champ_stats['avg_damage_dealt']):,}",
-                "AVG Damage Taken": f"{int(champ_stats['avg_damage_taken']):,}",
-                "AVG Healing": f"{int(champ_stats['avg_healing']):,}",
-                "AVG Shielding": f"{int(champ_stats['avg_shielding']):,}",
-                "AVG Credits": f"{int(champ_stats['avg_credits']):,}",
-                "AVG Objective Time": f"{int(champ_stats['obj_time']):,}",
-            }
-            global_data = {
-                "--- Global Stats ---": "",
-                "Global Winrate": f"{global_stats['winrate']:.2f}% ({global_stats['wins']}-{global_stats['losses']})",
-                "Global KDA": f"{global_stats['kda_ratio']:.2f}",
-            }
-            max_label_len = max(len(label) for label in list(champ_data.keys()) + list(global_data.keys()))
-            champ_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in champ_data.items()]
-            global_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in global_data.items()]
-            embed.description = "```\n" + "\n".join(champ_lines) + "\n\n" + "\n".join(global_lines) + "\n```"
-        else:
-            # STANDARD CHAMPION LAYOUT
-            global_stats = get_player_stats(player_id)
-            data = {
-                "Champion": full_champion_name,
-                "KDA": f"{champ_stats['kda_ratio']:.2f} ({champ_stats['raw_k']}/{champ_stats['raw_d']}/{champ_stats['raw_a']})",
-                "Winrate": f"{champ_stats['winrate']:.2f}% ({champ_stats['wins']}-{champ_stats['losses']})",
-                "": "", 
-                "Global KDA": f"{global_stats['kda_ratio']:.2f}",
-                "Global Winrate": f"{global_stats['winrate']:.2f}% ({global_stats['wins']}-{global_stats['losses']})",
-            }
-            max_label_len = max(len(label) for label in data.keys())
-            stat_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if label else "" for label, value in data.items()]
-            embed.description = "```\n" + "\n".join(stat_lines) + "\n```"
     else:
-        # --- GENERAL STATS ---
+        # --- GENERAL STATS LAYOUT ---
         stats = get_player_stats(player_id)
         if not stats or stats["games"] == 0:
             await ctx.send(f"No stats found for {target_user.display_name}.")
@@ -424,38 +433,28 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
         embed.title = f"Stats for {target_user.display_name}"
         embed.set_thumbnail(url=target_user.display_avatar.url)
 
-        if detailed:
-            # DETAILED GENERAL LAYOUT
-            data = {
-                "Winrate": f"{stats['winrate']:.2f}% ({stats['wins']}-{stats['losses']})",
-                "KDA": f"{stats['kda_ratio']:.2f} ({stats['raw_k']}/{stats['raw_d']}/{stats['raw_a']})",
-                "--- Per Minute ---": "",
-                "Damage/Min": f"{int(stats['damage_dealt_pm']):,}",
-                "Healing/Min": f"{int(stats['healing_pm']):,}",
-                "Credits/Min": f"{int(stats['credits_pm']):,}",
-                "--- Per Match ---": "",
-                "AVG Damage Dealt": f"{int(stats['avg_damage_dealt']):,}",
-                "AVG Damage Taken": f"{int(stats['avg_damage_taken']):,}",
-                "AVG Healing": f"{int(stats['avg_healing']):,}",
-                "AVG Shielding": f"{int(stats['avg_shielding']):,}",
-                "AVG Credits": f"{int(stats['avg_credits']):,}",
-                "AVG Objective Time": f"{int(stats['obj_time']):,}",
-            }
-            max_label_len = max(len(label) for label in data.keys())
-            stat_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in data.items()]
-            embed.description = "```\n" + "\n".join(stat_lines) + "\n```"
-        else:
-            # STANDARD GENERAL LAYOUT
-            data = {
-                "Winrate": f"{stats['winrate']:.2f}% ({stats['wins']}-{stats['losses']})",
-                "KDA": f"{stats['kda_ratio']:.2f} ({stats['raw_k']}/{stats['raw_d']}/{stats['raw_a']})",
-                "Damage/Min": f"{int(stats['damage_dealt_pm']):,}",
-                "Healing/Min": f"{int(stats['healing_pm']):,}",
-                "AVG Objective Time": f"{int(stats['obj_time']):,}"
-            }
-            max_label_len = max(len(label) for label in data.keys())
-            stat_lines = [f"{label + ':':<{max_label_len + 2}} {value}" for label, value in data.items()]
-            embed.description = "```\n" + "\n".join(stat_lines) + "\n```"
+        data = {
+            "Winrate": f"{stats['winrate']:.2f}% ({stats['wins']}-{stats['losses']})",
+            "KDA": f"{stats['kda_ratio']:.2f} ({stats['raw_k']}/{stats['raw_d']}/{stats['raw_a']})",
+            "--- Per Minute ---": "",
+            "Damage/Min": f"{int(stats['damage_dealt_pm']):,}",
+            "Damage Taken/Min": f"{int(stats['damage_taken_pm']):,}",
+            "Healing/Min": f"{int(stats['healing_pm']):,}",
+            "Self Healing/Min": f"{int(stats['self_healing_pm']):,}",
+            "Credits/Min": f"{int(stats['credits_pm']):,}",
+            "--- Per Match ---": "",
+            "AVG Damage Dealt": f"{int(stats['avg_damage_dealt']):,}",
+            "AVG Damage Taken": f"{int(stats['avg_damage_taken']):,}",
+            "AVG Damage Delta": f"{int(stats['damage_delta']):,}",
+            "AVG Healing": f"{int(stats['avg_healing']):,}",
+            "AVG Self Healing": f"{int(stats['avg_self_healing']):,}",
+            "AVG Shielding": f"{int(stats['avg_shielding']):,}",
+            "AVG Credits": f"{int(stats['avg_credits']):,}",
+            "AVG Objective Time": f"{int(stats['obj_time']):,}",
+        }
+        max_label_len = max(len(label) for label in data.keys())
+        stat_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in data.items()]
+        embed.description = "```\n" + "\n".join(stat_lines) + "\n```"
     
     # Set the footer
     fetch_time = (time.monotonic() - start_time) * 1000
@@ -466,30 +465,237 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
 
     await ctx.send(embed=embed, file=icon_file)
 
-@bot.command(name="history", help="Shows the last 5 matches for a player.")
-async def history_cmd(ctx, user: PlayerConverter = None):
+# --- NEW INTERACTIVE VIEW FOR !TOP COMMAND ---
+class TopChampsView(View):
+    def __init__(self, author_id, all_champ_data, target_user_name):
+        super().__init__(timeout=90)
+        self.author_id = author_id
+        self.all_champ_data = all_champ_data
+        self.target_user_name = target_user_name
+        self.current_sort_key = "games"  # Default sort
+        self.current_role_filter = None  # Default no filter
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        # Only allow the original command user to interact
+        return interaction.user.id == self.author_id
+
+    
+    async def on_timeout(self) -> None:
+        # The message is being deleted by `delete_after`, so we don't need to do anything here.
+        # This prevents the bot from trying to edit a message that no longer exists.
+        pass
+
+    def _generate_description(self) -> str:
+        """Generates the formatted text block based on current sort/filter."""
+        
+        filtered_data = self.all_champ_data
+        if self.current_role_filter:
+            filtered_data = [
+                champ for champ in self.all_champ_data
+                if CHAMPION_ROLES.get(champ["champ"]) == self.current_role_filter
+            ]
+
+        if not filtered_data:
+            return f"```\nNo champions played in the '{self.current_role_filter}' role.\n```"
+
+        sorted_data = sorted(filtered_data, key=lambda x: x[self.current_sort_key], reverse=True)
+
+        lines = []
+        # FIXED: Added trailing spaces to this line to increase the width of the code block.
+        header = f"{'Champion':<16}{'KDA':>6}{'WR':>8}{'Matches':>8}{'Time':>10}      "
+        separator = "-" * len(header)
+        
+        roles_to_display = [self.current_role_filter] if self.current_role_filter else ["Damage", "Flank", "Tank", "Support"]
+
+        for role in roles_to_display:
+            champs_in_role = [c for c in sorted_data if CHAMPION_ROLES.get(c["champ"]) == role]
+            if not champs_in_role:
+                continue
+            
+            lines.append(header)
+            lines.append(separator)
+            lines.append(f"#   {role}")
+            
+            for i, champ in enumerate(champs_in_role, 1):
+                name = champ['champ']
+                if len(name) > 13:
+                    name = name[:12] + "…"
+                kda, wr, matches, time_played = f"{champ['kda_ratio']:.2f}", f"{champ['winrate']:.1f}%", str(champ['games']), champ['time_played']
+                lines.append(f"{str(i)+'.':<4}{name:<12}{kda:>6}{wr:>8}{matches:>8}{time_played:>10}")
+            lines.append("")
+        
+        return "```\n" + "\n".join(lines) + "\n```"
+
+
+
+
+
+
+
+    @discord.ui.select(
+        placeholder="Sort by Matches",
+        options=[
+            discord.SelectOption(label="Sort by Matches", value="games", description="Default sorting, most played first."),
+            discord.SelectOption(label="Sort by KDA", value="kda_ratio", description="Highest KDA ratio first."),
+            discord.SelectOption(label="Sort by Winrate", value="winrate", description="Highest winrate first."),
+        ]
+    )
+
+
+    async def sort_select(self, interaction: discord.Interaction, select: Select):
+        self.current_sort_key = select.values[0]
+        select.placeholder = f"Sort by {select.values[0].replace('_', ' ').capitalize()}"
+        
+        new_description = self._generate_description()
+        await interaction.response.edit_message(content=None, embed=discord.Embed(
+            title=f"Top Champions for {self.target_user_name}",
+            description=new_description,
+            color=discord.Color.blue()
+        ), view=self)
+
+    @discord.ui.button(label="All Roles", style=discord.ButtonStyle.primary, row=2)
+    async def all_roles_button(self, interaction: discord.Interaction, button: Button):
+        self.current_role_filter = None
+        new_description = self._generate_description()
+        await interaction.response.edit_message(content=None, embed=discord.Embed(
+            title=f"Top Champions for {self.target_user_name}",
+            description=new_description,
+            color=discord.Color.blue()
+        ), view=self)
+
+    @discord.ui.button(label="Damage", style=discord.ButtonStyle.secondary, row=2)
+    async def damage_button(self, interaction: discord.Interaction, button: Button):
+        self.current_role_filter = "Damage"
+        new_description = self._generate_description()
+        await interaction.response.edit_message(content=None, embed=discord.Embed(
+            title=f"Top Champions for {self.target_user_name}",
+            description=new_description,
+            color=discord.Color.red()
+        ), view=self)
+
+    @discord.ui.button(label="Flank", style=discord.ButtonStyle.secondary, row=2)
+    async def flank_button(self, interaction: discord.Interaction, button: Button):
+        self.current_role_filter = "Flank"
+        new_description = self._generate_description()
+        await interaction.response.edit_message(content=None, embed=discord.Embed(
+            title=f"Top Champions for {self.target_user_name}",
+            description=new_description,
+            color=discord.Color.purple()
+        ), view=self)
+
+    @discord.ui.button(label="Tank", style=discord.ButtonStyle.secondary, row=3)
+    async def tank_button(self, interaction: discord.Interaction, button: Button):
+        self.current_role_filter = "Tank"
+        new_description = self._generate_description()
+        await interaction.response.edit_message(content=None, embed=discord.Embed(
+            title=f"Top Champions for {self.target_user_name}",
+            description=new_description,
+            color=discord.Color.orange()
+        ), view=self)
+
+    @discord.ui.button(label="Support", style=discord.ButtonStyle.secondary, row=3)
+    async def support_button(self, interaction: discord.Interaction, button: Button):
+        self.current_role_filter = "Support"
+        new_description = self._generate_description()
+        await interaction.response.edit_message(content=None, embed=discord.Embed(
+            title=f"Top Champions for {self.target_user_name}",
+            description=new_description,
+            color=discord.Color.green()
+        ), view=self)
+
+
+# --- USER COMMANDS ---
+
+# NEW: The !top command with interactive UI
+@bot.command(name="top", help="Shows an interactive breakdown of a player's champions.")
+async def top_cmd(ctx, user: PlayerConverter = None):
     target_user = user or ctx.author
     player_id = get_player_id(str(target_user.id))
 
     if not player_id:
+        await ctx.send(f"No stats found for {target_user.display_name}. They may need to `!link` their IGN.")
+        return
+        
+    all_champ_data = get_all_champion_stats(player_id)
+    if not all_champ_data:
+        await ctx.send(f"No champion stats found for {target_user.display_name}.")
+        return
+
+    # Create and send the initial view
+    view = TopChampsView(ctx.author.id, all_champ_data, target_user.display_name)
+    initial_description = view._generate_description()
+    
+    embed = discord.Embed(
+        title=f"Top Champions for {target_user.display_name}",
+        description=initial_description,
+        color=discord.Color.blue()
+    )
+    
+    # Send the message and store it on the view for later editing
+    view.message = await ctx.send(
+        "This message will self-destruct in 90 seconds.\nSelect an option:",
+        embed=embed,
+        view=view,
+        delete_after=90
+    )
+
+
+
+@bot.command(name="history", help="Shows recent matches. Ex: !history 10, !history @user 5")
+async def history_cmd(ctx, *args):
+    target_user = ctx.author
+    limit = 30
+    user_input_parts = []
+
+    if args:
+        if args[-1].isdigit():
+            limit = int(args[-1])
+            user_input_parts = args[:-1]
+        else:
+            user_input_parts = args
+    
+    if user_input_parts:
+        try:
+            target_user = await PlayerConverter().convert(ctx, " ".join(user_input_parts))
+        except commands.BadArgument as e:
+            await ctx.send(e)
+            return
+            
+    limit = max(1, min(limit, 50))
+
+    player_id = get_player_id(str(target_user.id))
+    if not player_id:
         await ctx.send(f"No history found for {target_user.display_name}. They may need to link their IGN using `!link <ign>`.")
         return
 
-    history = get_match_history(player_id)
+    history = get_match_history(player_id, limit)
     if not history:
         await ctx.send(f"No match history found for {target_user.display_name}.")
         return
 
-    embed = discord.Embed(title=f"Match History for {target_user.display_name}", color=discord.Color.green())
+    embed = discord.Embed(
+        title=f"Last {len(history)} Matches for {target_user.display_name}",
+        color=discord.Color.green()
+    )
     embed.set_thumbnail(url=target_user.display_avatar.url)
 
-    description = []
-    for match in history:
-        map_name, champ, k, d, a, result = match
-        emoji = "🏆" if result == "W" else "💔"
-        description.append(f"{emoji} **[{result}]** {champ} - `{k}/{d}/{a}` on {map_name}")
+    header = f"  {'CHAMPION':<12} {'TIME':<7} {'MATCH ID':<10} {'KDA':>5} {'RAW KDA':<12} MAP"
+    separator = "─" * (len(header) + 4)
+    lines = [header, separator]
 
-    embed.description = "\n".join(description)
+    for match in history:
+        map_name, champ, k, d, a, result, match_id, match_time = match
+        
+        emoji = "🏆" if result == "W" else "💔"
+        kda_ratio = f"{(k + a) / max(1, d):.2f}"
+        time_str = f"{match_time}:00"
+        raw_kda_str = f"({k}/{d}/{a})"
+        champ_str = (champ[:11] + '…') if len(champ) > 12 else champ
+        
+        line = f"{emoji} {champ_str:<12} {time_str:<7} {match_id:<10} {kda_ratio:>5} {raw_kda_str:<12} {map_name}"
+        lines.append(line)
+
+    embed.description = "```\n" + "\n".join(lines) + "\n```"
     await ctx.send(embed=embed)
 
 @bot.command(name="leaderboard", aliases=['lb'], help="Shows the top players for a given stat.")
@@ -534,8 +740,11 @@ async def leaderboard_cmd(ctx, stat: str, limit: int = 10):
     embed.description = "\n".join(description)
     await ctx.send(embed=embed)
 
-@bot.command(name="top_champs", help="Get top 5 champs for a player.")
-async def top_champs_cmd(ctx, user: PlayerConverter = None):
+
+
+# RENAMED: The old !top_champs command is now legacy
+@bot.command(name="legacy_top_champs", help="[LEGACY] Get top 5 champs for a player (non-interactive).", hidden=True)
+async def legacy_top_champs_cmd(ctx, user: PlayerConverter = None):
     target_user = user or ctx.author
     player_id = get_player_id(str(target_user.id))
 
@@ -730,3 +939,8 @@ async def on_command_error(ctx, error):
         await ctx.send("An unexpected error occurred. Please contact an administrator.")
 
 bot.run(os.getenv("BOT_TOKEN"))
+
+
+
+
+
