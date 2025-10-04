@@ -99,7 +99,8 @@ def insert_scoreboard(scoreboard, queue_num):
             (match_id, time, region, map_name, team1_score, team2_score, queue_num),
         )
 
-        for idx, player in enumerate(players):
+        # The loop no longer needs to calculate the team number
+        for player in players:
             ign = player["name"]
             champ = player["champ"]
             talent = player["talent"]
@@ -113,7 +114,7 @@ def insert_scoreboard(scoreboard, queue_num):
             shielding = player["shielding"]
             healing = player["healing"]
             self_healing = player["self_healing"]
-            team = 1 if idx < 5 else 2
+            team = player["team"]  # Use the team number from the parser
 
             cursor.execute(
                 "SELECT player_id, discord_id, alt_igns FROM players WHERE player_ign = ?;",
@@ -434,11 +435,14 @@ def get_player_id(discord_id):
     conn.close()
     return result[0] if result else None
 
-def get_player_stats(player_id, champion=None):
+def get_player_stats(player_id, champions=None):
+    """
+    Fetches aggregated player stats.
+    Can be filtered by a list of champions.
+    """
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
-        # ADDED: Now selects self_healing
         query = """
             SELECT
                 ps.kills, ps.deaths, ps.assists, ps.damage, ps.objective_time,
@@ -453,16 +457,18 @@ def get_player_stats(player_id, champion=None):
             WHERE ps.player_id = ?
         """
         params = [player_id]
-        if champion:
-            query += " AND ps.champ = ?"
-            params.append(champion)
+
+        # MODIFIED: Now accepts a list of champions
+        if champions and isinstance(champions, list):
+            placeholders = ', '.join('?' for _ in champions)
+            query += f" AND ps.champ IN ({placeholders})"
+            params.extend(champions)
 
         cursor.execute(query, params)
         rows = cursor.fetchall()
         if not rows:
             return None
 
-        # ADDED: Unpacks total_self_healing
         total_kills, total_deaths, total_assists, total_damage, total_obj_time, total_shielding, total_healing, total_time_in_minutes, total_wins, total_credits, total_taken, total_self_healing = [sum(col) for col in zip(*rows)]
         games_played = len(rows)
         total_losses = games_played - total_wins
@@ -496,7 +502,6 @@ def get_player_stats(player_id, champion=None):
         }
     finally:
         conn.close()
-
 
 
 def get_top_champs(player_id):
@@ -628,6 +633,7 @@ CHAMPION_ROLES = {
     "Imani": "Damage", "Kinessa": "Damage", "Lian": "Damage", "Octavia": "Damage",
     "Saati": "Damage", "Sha Lin": "Damage", "Strix": "Damage", "Tiberius": "Damage",
     "Tyra": "Damage", "Viktor": "Damage", "Willo": "Damage", "Betty la Bomba": "Damage",
+    "Omen": "Damage",
     # Flank
     "Androxus": "Flank", "Buck": "Flank", "Caspian": "Flank", "Evie": "Flank",
     "Koga": "Flank", "Lex": "Flank", "Maeve": "Flank", "Moji": "Flank",
@@ -636,7 +642,7 @@ CHAMPION_ROLES = {
     # Tank
     "Ash": "Tank", "Atlas": "Tank", "Azaan": "Tank", "Barik": "Tank", "Fernando": "Tank",
     "Inara": "Tank", "Khan": "Tank", "Makoa": "Tank", "Raum": "Tank", "Ruckus": "Tank",
-    "Terminus": "Tank", "Torvald": "Tank", "Yagorath": "Tank", "Nyx": "Tank", "Omen": "Tank",
+    "Terminus": "Tank", "Torvald": "Tank", "Yagorath": "Tank", "Nyx": "Tank",
     # Support
     "Corvus": "Support", "Furia": "Support", "Ghrok": "Support", "Grover": "Support",
     "Io": "Support", "Jenos": "Support", "Lillith": "Support", "Mal'Damba": "Support",

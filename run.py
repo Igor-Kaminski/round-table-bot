@@ -72,6 +72,13 @@ CHAMPION_ROLES = {
     "Pip": "Support", "Rei": "Support", "Seris": "Support", "Ying": "Support",
 }
 
+ROLE_ALIASES = {
+    'dmg': 'Damage', 'damage': 'Damage',
+    'sup': 'Support', 'supp': 'Support', 'suppo': 'Support', 'support': 'Support',
+    'tank': 'Tank', 'frontline': 'Tank',
+    'flank': 'Flank',
+}
+
 
 @bot.event
 async def on_ready():
@@ -83,15 +90,24 @@ async def on_ready():
         print(f"Failed to sync commands or load cog: {e}")
 
 
-def is_exec(ctx_or_message):
-    author = getattr(ctx_or_message, "author", None)
-    if author is None:
+# NEW, CORRECTED VERSION
+def is_exec(ctx_or_interaction):
+    # Get the user object, whether from a command (author) or a button click (user)
+    user = getattr(ctx_or_interaction, "author", None)
+    if user is None:
+        user = getattr(ctx_or_interaction, "user", None)
+
+    # If we couldn't find a user, deny permission
+    if user is None:
         return False
-    if hasattr(author, "roles"):
-        if any(role.name in BOT_PERMISSION_ROLE_NAMES for role in author.roles):
+
+    # The rest of the permission checks
+    if hasattr(user, "roles"):
+        if any(role.name in BOT_PERMISSION_ROLE_NAMES for role in user.roles):
             return True
-    if author.id in BOT_PERMISSION_USER_IDS:
+    if user.id in BOT_PERMISSION_USER_IDS:
         return True
+
     return False
 
 
@@ -379,8 +395,10 @@ async def link(ctx, ign: str):
         await ctx.send("An error occurred while linking your account.")
 
 
-@bot.command(name="stats", help="Get detailed stats for a player, with an optional champion filter.")
-async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
+
+
+@bot.command(name="stats", help="Get stats for a player, with an optional champion or role filter.")
+async def stats_cmd(ctx, user: PlayerConverter = None, *, filter_str: str = None):
     start_time = time.monotonic()
     target_user = user or ctx.author
     
@@ -391,59 +409,107 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
 
     icon_file = None
     embed = discord.Embed(color=discord.Color.blue())
-
-    if champion:
-        # --- CHAMPION-SPECIFIC STATS LAYOUT ---
-        full_champion_name = get_champion_name(player_id, champion)
-        if not full_champion_name:
-            await ctx.send(f"No stats found for {target_user.display_name} on a champion matching '{champion}'.")
-            return
+    
+    # --- Filtered Stats Logic (Champion or Role) ---
+    if filter_str:
+        filter_lower = filter_str.lower()
         
-        champ_stats = get_player_stats(player_id, full_champion_name)
-        if not champ_stats or champ_stats["games"] == 0:
-            await ctx.send(f"No stats found for {target_user.display_name} on {full_champion_name}.")
-            return
+        # --- ROLE-BASED STATS ---
+        if filter_lower in ROLE_ALIASES:
+            role_name = ROLE_ALIASES[filter_lower]
+            champs_in_role = [champ for champ, r_name in CHAMPION_ROLES.items() if r_name == role_name]
+            
+            if not champs_in_role:
+                await ctx.send("Internal error: Could not find champions for that role.")
+                return
 
-        global_stats = get_player_stats(player_id)
+            role_stats = get_player_stats(player_id, champions=champs_in_role)
 
-        embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=target_user.display_avatar.url)
-        icon_path = get_champion_icon_path(full_champion_name)
-        if os.path.exists(icon_path):
-            icon_file = discord.File(icon_path, filename="icon.png")
-            embed.set_thumbnail(url="attachment://icon.png")
-        
-        champ_data = {
-            f"--- Champion: {full_champion_name} ---": "",
-            "Winrate": f"{champ_stats['winrate']:.2f}% ({champ_stats['wins']}-{champ_stats['losses']})",
-            "KDA": f"{champ_stats['kda_ratio']:.2f} ({champ_stats['raw_k']}/{champ_stats['raw_d']}/{champ_stats['raw_a']})",
-            "Damage/Min": f"{int(champ_stats['damage_dealt_pm']):,}",
-            "Damage Taken/Min": f"{int(champ_stats['damage_taken_pm']):,}",
-            "Healing/Min": f"{int(champ_stats['healing_pm']):,}",
-            "Self Healing/Min": f"{int(champ_stats['self_healing_pm']):,}",
-            "Credits/Min": f"{int(champ_stats['credits_pm']):,}",
-            "AVG Damage Dealt": f"{int(champ_stats['avg_damage_dealt']):,}",
-            "AVG Damage Taken": f"{int(champ_stats['avg_damage_taken']):,}",
-            "AVG Damage Delta": f"{int(champ_stats['damage_delta']):,}",
-            "AVG Healing": f"{int(champ_stats['avg_healing']):,}",
-            "AVG Self Healing": f"{int(champ_stats['avg_self_healing']):,}",
-            "AVG Shielding": f"{int(champ_stats['avg_shielding']):,}",
-            "AVG Credits": f"{int(champ_stats['avg_credits']):,}",
-            "AVG Objective Time": f"{int(champ_stats['obj_time']):,}",
-        }
-        global_data = {
-            "--- Global Stats ---": "",
-            "Global Winrate": f"{global_stats['winrate']:.2f}% ({global_stats['wins']}-{global_stats['losses']})",
-            "Global KDA": f"{global_stats['kda_ratio']:.2f}",
-        }
-        max_label_len = max(len(label) for label in list(champ_data.keys()) + list(global_data.keys()))
-        
-        champ_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in champ_data.items()]
-        global_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in global_data.items()]
-        
-        embed.description = "```\n" + "\n".join(champ_lines) + "\n\n" + "\n".join(global_lines) + "\n```"
+            if not role_stats or role_stats["games"] == 0:
+                await ctx.send(f"No stats found for {target_user.display_name} playing the '{role_name}' role.")
+                return
 
+            embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=target_user.display_avatar.url)
+            
+            # RESTORED: Full stats layout for roles
+            data = {
+                f"--- Role: {role_name} ({role_stats['games']} games) ---": "",
+                "Winrate": f"{role_stats['winrate']:.2f}% ({role_stats['wins']}-{role_stats['losses']})",
+                "KDA": f"{role_stats['kda_ratio']:.2f} ({role_stats['raw_k']}/{role_stats['raw_d']}/{role_stats['raw_a']})",
+                "--- Per Minute ---": "",
+                "Damage/Min": f"{int(role_stats['damage_dealt_pm']):,}",
+                "Damage Taken/Min": f"{int(role_stats['damage_taken_pm']):,}",
+                "Healing/Min": f"{int(role_stats['healing_pm']):,}",
+                "Self Healing/Min": f"{int(role_stats['self_healing_pm']):,}",
+                "Credits/Min": f"{int(role_stats['credits_pm']):,}",
+                "--- Per Match ---": "",
+                "AVG Damage Dealt": f"{int(role_stats['avg_damage_dealt']):,}",
+                "AVG Damage Taken": f"{int(role_stats['avg_damage_taken']):,}",
+                "AVG Damage Delta": f"{int(role_stats['damage_delta']):,}",
+                "AVG Healing": f"{int(role_stats['avg_healing']):,}",
+                "AVG Self Healing": f"{int(role_stats['avg_self_healing']):,}",
+                "AVG Shielding": f"{int(role_stats['avg_shielding']):,}",
+                "AVG Credits": f"{int(role_stats['avg_credits']):,}",
+                "AVG Objective Time": f"{int(role_stats['obj_time']):,}",
+            }
+            max_label_len = max(len(label) for label in data.keys())
+            stat_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in data.items()]
+            embed.description = "```\n" + "\n".join(stat_lines) + "\n```"
+
+        # --- CHAMPION-BASED STATS ---
+        else:
+            full_champion_name = get_champion_name(player_id, filter_str)
+            if not full_champion_name:
+                await ctx.send(f"No stats found for {target_user.display_name} on a champion or role matching '{filter_str}'.")
+                return
+            
+            champ_stats = get_player_stats(player_id, champions=[full_champion_name])
+            if not champ_stats or champ_stats["games"] == 0:
+                await ctx.send(f"No stats found for {target_user.display_name} on {full_champion_name}.")
+                return
+
+            # RESTORED: Fetch global stats for comparison
+            global_stats = get_player_stats(player_id)
+
+            embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=target_user.display_avatar.url)
+            icon_path = get_champion_icon_path(full_champion_name)
+            if os.path.exists(icon_path):
+                icon_file = discord.File(icon_path, filename="icon.png")
+                embed.set_thumbnail(url="attachment://icon.png")
+            
+            # RESTORED: Full stats layout for champions
+            champ_data = {
+                f"--- Champion: {full_champion_name} ---": "",
+                "Winrate": f"{champ_stats['winrate']:.2f}% ({champ_stats['wins']}-{champ_stats['losses']})",
+                "KDA": f"{champ_stats['kda_ratio']:.2f} ({champ_stats['raw_k']}/{champ_stats['raw_d']}/{champ_stats['raw_a']})",
+                "Damage/Min": f"{int(champ_stats['damage_dealt_pm']):,}",
+                "Damage Taken/Min": f"{int(champ_stats['damage_taken_pm']):,}",
+                "Healing/Min": f"{int(champ_stats['healing_pm']):,}",
+                "Self Healing/Min": f"{int(champ_stats['self_healing_pm']):,}",
+                "Credits/Min": f"{int(champ_stats['credits_pm']):,}",
+                "AVG Damage Dealt": f"{int(champ_stats['avg_damage_dealt']):,}",
+                "AVG Damage Taken": f"{int(champ_stats['avg_damage_taken']):,}",
+                "AVG Damage Delta": f"{int(champ_stats['damage_delta']):,}",
+                "AVG Healing": f"{int(champ_stats['avg_healing']):,}",
+                "AVG Self Healing": f"{int(champ_stats['avg_self_healing']):,}",
+                "AVG Shielding": f"{int(champ_stats['avg_shielding']):,}",
+                "AVG Credits": f"{int(champ_stats['avg_credits']):,}",
+                "AVG Objective Time": f"{int(champ_stats['obj_time']):,}",
+            }
+            # RESTORED: Global stats section
+            global_data = {
+                "--- Global Stats ---": "",
+                "Global Winrate": f"{global_stats['winrate']:.2f}% ({global_stats['wins']}-{global_stats['losses']})",
+                "Global KDA": f"{global_stats['kda_ratio']:.2f}",
+            }
+
+            max_label_len = max(len(label) for label in list(champ_data.keys()) + list(global_data.keys()))
+            champ_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in champ_data.items()]
+            global_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in global_data.items()]
+            embed.description = "```\n" + "\n".join(champ_lines) + "\n\n" + "\n".join(global_lines) + "\n```"
+
+    # --- GENERAL STATS (No Filter) ---
     else:
-        # --- GENERAL STATS LAYOUT ---
         stats = get_player_stats(player_id)
         if not stats or stats["games"] == 0:
             await ctx.send(f"No stats found for {target_user.display_name}.")
@@ -452,6 +518,7 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
         embed.title = f"Stats for {target_user.display_name}"
         embed.set_thumbnail(url=target_user.display_avatar.url)
 
+        # RESTORED: Full stats layout for general stats
         data = {
             "Winrate": f"{stats['winrate']:.2f}% ({stats['wins']}-{stats['losses']})",
             "KDA": f"{stats['kda_ratio']:.2f} ({stats['raw_k']}/{stats['raw_d']}/{stats['raw_a']})",
@@ -478,7 +545,7 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, champion: str = None):
     # Set the footer
     fetch_time = (time.monotonic() - start_time) * 1000
     footer_text = f"Fetched in {fetch_time:.0f}ms"
-    if not champion:
+    if not filter_str:
         footer_text = f"Player ID: {target_user.id}  •  {footer_text}"
     embed.set_footer(text=footer_text, icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
 
@@ -983,30 +1050,58 @@ async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None
 # --- DATA INGESTION LOGIC & EVENT HANDLERS ---
 
 def parse_match_textbox(text):
-    lines = [l.strip() for l in text.splitlines() if l.strip()]
-    if not lines: raise ValueError("No lines found in match text!")
+    print("\n--- [DEBUG] Starting to parse match textbox ---")
+    lines = text.splitlines()
     
-    match_info = lines[0].split(",")
-    if len(match_info) < 6: raise ValueError("Malformed match info line!")
-    
+    # Filter out all empty/whitespace-only lines to get a clean list of data
+    data_lines = [line.strip() for line in lines if line.strip()]
+    if not data_lines:
+        raise ValueError("No data lines found in match text!")
+
+    # --- Header Parsing ---
+    header_line = data_lines[0]
+    match_info = header_line.strip().split(",")
+    if len(match_info) < 6:
+        print(f"--- [ERROR] Malformed match info line. Line: '{header_line}'")
+        raise ValueError("Malformed match info line!")
     try:
-        # MODIFIED: Only unpack the first 6 elements and ignore any extras.
         match_id, time, region, map_name, team1_score, team2_score = [s.strip() for s in match_info[:6]]
-    except Exception:
+        print(f"[DEBUG] Parsed Header: MatchID={match_id}, Score={team1_score}-{team2_score}, Map='{map_name}'")
+    except Exception as e:
+        print(f"--- [ERROR] Could not unpack match info line. Line: '{header_line}'. Error: {e}")
         raise ValueError("Could not unpack match info line.")
 
+    # --- Player Parsing ---
     players = []
-    for idx, line in enumerate(lines[1:], start=2):
-        if not line.startswith("["): raise ValueError(f"Malformed player line {idx}: {line}")
-        reader = csv.reader(io.StringIO(line.strip("[]")), skipinitialspace=True, quotechar="'")
-        parts = next(reader)
-        if len(parts) != 12: raise ValueError(f"Malformed player line {idx}: {len(parts)} fields")
-        
-        del parts[3]
-        kda_parts = parts[4].split("/")
-        if len(kda_parts) != 3: raise ValueError(f"Malformed KDA in line {idx}")
+    # All lines after the header are considered player lines
+    player_lines = data_lines[1:] 
 
+    print(f"[DEBUG] Found {len(player_lines)} total player lines to process.")
+
+    # Team 1 is the first 5 players. Team 2 is everyone after. This is robust.
+    for i, line in enumerate(player_lines):
+        current_team = 1 if i < 5 else 2
+        
+        print(f"\n[DEBUG] Processing line for Team {current_team}: '{line}'")
+
+        if not line.startswith("[") or not line.endswith("]"):
+            print(f"--- [ERROR] Line is missing brackets.")
+            raise ValueError(f"Malformed player line: Missing brackets. Line: ```{line}```")
+        
         try:
+            csv_content = line.strip("[]")
+            reader = csv.reader(io.StringIO(csv_content), skipinitialspace=True, quotechar="'")
+            parts = next(reader)
+            
+            if len(parts) != 12:
+                print(f"--- [ERROR] Incorrect field count. Expected 12, got {len(parts)}.")
+                raise ValueError(f"Malformed player line: Expected 12 fields, but got {len(parts)}. Line: ```{line}```")
+
+            del parts[3]
+            kda_parts = parts[4].split("/")
+            if len(kda_parts) != 3:
+                raise ValueError(f"Malformed KDA in line. KDA: `{parts[4]}`")
+
             player = {
                 "name": parts[0], "champ": parts[1], "talent": parts[2],
                 "credits": int(parts[3].replace(",", "")), "kills": int(kda_parts[0]),
@@ -1014,11 +1109,16 @@ def parse_match_textbox(text):
                 "damage": int(parts[5].replace(",", "")), "taken": int(parts[6].replace(",", "")),
                 "obj_time": int(parts[7]), "shielding": int(parts[8].replace(",", "")),
                 "healing": int(parts[9].replace(",", "")), "self_healing": int(parts[10].replace(",", "")),
+                "team": current_team
             }
             players.append(player)
-        except Exception as e:
-            raise ValueError(f"Error parsing player line {idx}: {e}")
+            print("  - Successfully parsed player stats.")
 
+        except Exception as e:
+            print(f"--- [FATAL ERROR] An unexpected error occurred while parsing this line: {e}")
+            raise ValueError(f"An unexpected error occurred on a player line. Please check its format. Error: {e}. Line: ```{line}```")
+
+    print(f"\n--- [DEBUG] Finished parsing. Total players found: {len(players)} ---")
     return {
         "match_id": int(match_id), "time": int(time), "region": region,
         "map": map_name, "team1_score": int(team1_score),
@@ -1104,27 +1204,94 @@ class QueueNumView(View):
 
 @bot.event
 async def on_message(message):
-    if message.author.bot:
-        await bot.process_commands(message)
-        try:
-            if isinstance(message.channel, discord.TextChannel) and message.channel.name in ALLOWED_CHANNELS:
-                if message.author.name == "NeatQueue" and message.author.discriminator == "0850" and message.embeds:
-                    for embed in message.embeds:
-                        queue_number_match = re.search(r"Queue #?(\d+)", embed.title or "") or re.search(r"Queue #?(\d+)", embed.description or "")
-                        if queue_number_match:
-                            queue_number = queue_number_match.group(1)
-                            insert_embed(queue_number, embed.to_dict())
-                
-                elif message.author.name == "PaladinsAssistant" and message.author.discriminator == "2894":
-                    match_text = message.content or (message.embeds[0].description if message.embeds else None)
-                    if match_text:
-                        view = QueueNumView(match_text, message.author.id)
-                        await message.reply("Admins: Click to enter the queue number for this match:", view=view)
-        except Exception as e:
-            print(f"Error in on_message processing: {e}")
+    # Ignore messages from itself and other bots we don't care about
+    if message.author.bot and message.author.name not in ["PaladinsAssistant", "NeatQueue"]:
         return
+    
+    try:
+        if isinstance(message.channel, discord.TextChannel) and message.channel.name in ALLOWED_CHANNELS:
+            
+            # --- FULLY AUTOMATED SCOREBOARD INGESTION ---
+            if message.author.name == "PaladinsAssistant" and message.author.discriminator == "2894":
+                
+                # Step 1: Safely combine message parts to get the full raw text
+                raw_text = ""
+                if message.embeds:
+                    embed = message.embeds[0]
+                    parts = []
+                    if embed.title: parts.append(embed.title)
+                    if embed.description: parts.append(embed.description)
+                    raw_text = "\n".join(parts)
+                else:
+                    raw_text = message.content
 
-    await bot.process_commands(message)
+                if not raw_text.strip():
+                    return # Ignore empty messages
+
+                # Step 2: Intelligently find the start of the scoreboard data
+                lines = raw_text.strip().split('\n')
+                start_index = -1
+                for i, line in enumerate(lines):
+                    if re.match(r'^\s*\d{9,12}\s*,', line.strip()):
+                        start_index = i
+                        break
+                
+                if start_index == -1:
+                    return 
+
+                raw_scoreboard_text = "\n".join(lines[start_index:])
+                cleaned_text = raw_scoreboard_text.strip().strip("`")
+                
+                # Step 3: Parse the cleaned text into structured data
+                try:
+                    match_data = parse_match_textbox(cleaned_text)
+                    match_id = match_data["match_id"]
+                except ValueError as e:
+                    await message.channel.send(f"⚠️ **Could not parse scoreboard.**\n**Reason:** {e}")
+                    return
+
+                # Step 4: Perform Safety Checks
+                # Check 1: Prevent duplicate matches
+                # --- THIS IS THE CHANGED BLOCK ---
+                if match_exists(match_id):
+                    await message.channel.send(f"⚠️ Match `{match_id}` has already been recorded.")
+                    return # Stop processing to avoid duplicates
+
+                # Check 2: Verify all players in the match are linked
+                ign_list = [player["name"] for player in match_data["players"]]
+                _, igns_not_registered = get_registered_igns(ign_list)
+
+                if igns_not_registered:
+                    unlinked_players = ", ".join(f"`{ign}`" for ign in igns_not_registered)
+                    error_msg = (
+                        f"❌ **Match `{match_id}` Not Recorded.**\n"
+                        f"The following players must link their accounts with `!link <ign>` first:\n"
+                        f"{unlinked_players}"
+                    )
+                    await message.channel.send(error_msg)
+                    return
+
+                # Step 5: If all checks pass, insert the data into the database
+                insert_scoreboard(match_data, match_id)
+                
+                # Step 6: Send a public confirmation message
+                await message.channel.send(f"✅ **Match `{match_id}` successfully recorded.**")
+                print(f"Successfully ingested match {match_id}.")
+
+            # --- This part saves NeatQueue embeds for player verification ---
+            elif message.author.name == "NeatQueue" and message.author.discriminator == "0850" and message.embeds:
+                for embed in message.embeds:
+                    queue_number_match = re.search(r"Queue #?(\d+)", embed.title or "") or re.search(r"Queue #?(\d+)", embed.description or "")
+                    if queue_number_match:
+                        queue_number = queue_number_match.group(1)
+                        insert_embed(queue_number, embed.to_dict())
+
+    except Exception as e:
+        print(f"Error in on_message processing: {e}")
+
+    # Allow other commands to be processed
+    if not message.author.bot:
+        await bot.process_commands(message)
 
 @bot.event
 async def on_command_error(ctx, error):
