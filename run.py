@@ -56,6 +56,7 @@ CHAMPION_ROLES = {
     "Imani": "Damage", "Kinessa": "Damage", "Lian": "Damage", "Octavia": "Damage",
     "Saati": "Damage", "Sha Lin": "Damage", "Strix": "Damage", "Tiberius": "Damage",
     "Tyra": "Damage", "Viktor": "Damage", "Willo": "Damage", "Betty la Bomba": "Damage",
+    "Omen": "Damage",
     # Flank
     "Androxus": "Flank", "Buck": "Flank", "Caspian": "Flank", "Evie": "Flank",
     "Koga": "Flank", "Lex": "Flank", "Maeve": "Flank", "Moji": "Flank",
@@ -64,7 +65,7 @@ CHAMPION_ROLES = {
     # Tank
     "Ash": "Tank", "Atlas": "Tank", "Azaan": "Tank", "Barik": "Tank", "Fernando": "Tank",
     "Inara": "Tank", "Khan": "Tank", "Makoa": "Tank", "Raum": "Tank", "Ruckus": "Tank",
-    "Terminus": "Tank", "Torvald": "Tank", "Yagorath": "Tank", "Nyx": "Tank", "Omen": "Tank",
+    "Terminus": "Tank", "Torvald": "Tank", "Yagorath": "Tank", "Nyx": "Tank", 
     # Support
     "Corvus": "Support", "Furia": "Support", "Ghrok": "Support", "Grover": "Support",
     "Io": "Support", "Jenos": "Support", "Lillith": "Support", "Mal'Damba": "Support",
@@ -659,10 +660,10 @@ async def top_cmd(ctx, user: PlayerConverter = None):
 
 
 
-@bot.command(name="history", help="Shows recent matches. Ex: !history 10, !history @user 5")
+@bot.command(name="history", help="Shows recent matches. Ex: !history 10, !history @user 5 | Max 20")
 async def history_cmd(ctx, *args):
     target_user = ctx.author
-    limit = 30
+    limit = 20  # Default to 20
     user_input_parts = []
 
     if args:
@@ -679,7 +680,8 @@ async def history_cmd(ctx, *args):
             await ctx.send(e)
             return
 
-    limit = max(1, min(limit, 50))
+    # MODIFIED: The maximum number of matches is now capped at 20.
+    limit = max(1, min(limit, 20))
 
     player_id = get_player_id(str(target_user.id))
     if not player_id:
@@ -693,27 +695,20 @@ async def history_cmd(ctx, *args):
         await ctx.send(f"No match history found for {target_user.display_name}.")
         return
 
-    # Header - Changed "Result" to "W/L" and adjusted padding
     header = f"{'W/L':<5} {'Champion':<16} {'Time':<6} {'Match ID':<10} {'KDA':<6} {'Raw KDA':<11} {'Map':<20}"
     lines = [header]
 
     for match in history:
         map_name, champ, k, d, a, result, match_id, match_time = match
-
         symbol = "🏆" if result == "W" else "💔"
         kda_ratio = f"{(k + a) / max(1, d):.2f}"
         time_str = f"{match_time}:00"
         raw_kda_str = f"({k}/{d}/{a})"
-
-        # Truncate long names
         champ_str = champ if len(champ) <= 16 else champ[:15] + "…"
         map_str = map_name if len(map_name) <= 20 else map_name[:19] + "…"
-
-        # Data Row - Adjusted padding to match the new header
         line = f"{symbol:<4} {champ_str:<16} {time_str:<6} {match_id:<10} {kda_ratio:<6} {raw_kda_str:<11} {map_str:<20}"
         lines.append(line)
 
-    # Final message
     output = f"Last {len(history)} Matches for {target_user.display_name}\n\n" + "\n".join(lines)
     await ctx.send(f"```diff\n{output}\n```")
 
