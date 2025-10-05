@@ -926,3 +926,34 @@ def get_all_champion_stats(player_id):
         champs.append(champ_stats)
     conn.close()
     return champs
+
+
+def delete_match(match_id):
+    """Deletes a match and all associated player stats from the database."""
+    conn = sqlite3.connect("match_data.db")
+    cursor = conn.cursor()
+    try:
+        # First, check if the match even exists
+        cursor.execute("SELECT 1 FROM matches WHERE match_id = ?", (match_id,))
+        if not cursor.fetchone():
+            return 0  # Return 0 to indicate the match was not found
+
+        # Delete from player_stats first (due to foreign key relationship)
+        cursor.execute("DELETE FROM player_stats WHERE match_id = ?", (match_id,))
+        stats_deleted_count = cursor.rowcount
+
+        # Then, delete the match itself
+        cursor.execute("DELETE FROM matches WHERE match_id = ?", (match_id,))
+        match_deleted_count = cursor.rowcount
+
+        conn.commit()
+        
+        # Return the total number of rows deleted
+        return stats_deleted_count + match_deleted_count
+    except sqlite3.Error as e:
+        print(f"An error occurred while deleting match {match_id}: {e}")
+        conn.rollback()
+        return 0
+    finally:
+        conn.close()
+

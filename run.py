@@ -33,6 +33,7 @@ from db import (
     get_discord_id_for_ign,
     get_champion_name,
     get_all_champion_stats,
+    delete_match,
 )
 import csv
 import io
@@ -80,6 +81,8 @@ ROLE_ALIASES = {
 }
 
 
+
+
 @bot.event
 async def on_ready():
     print(f"Logged in as {bot.user}")
@@ -88,7 +91,6 @@ async def on_ready():
         print(f"Synced {len(synced)} command(s) to guild")
     except Exception as e:
         print(f"Failed to sync commands or load cog: {e}")
-
 
 # NEW, CORRECTED VERSION
 def is_exec(ctx_or_interaction):
@@ -111,24 +113,11 @@ def is_exec(ctx_or_interaction):
     return False
 
 
-
 def get_champion_icon_path(champion_name):
     """Formats a champion name into a valid file path for its icon."""
-    # Converts "Champion Name" into "champion_name.png"
     formatted_name = champion_name.lower().replace(" ", "_").replace("'", "")
-    # This assumes your icon files are named like 'androxus.png', 'sha_lin.png', etc.
-    # and are located in 'icons/champ_icons/'
     return os.path.join("icons", "champ_icons", f"{formatted_name}.png")
 
-
-
-
-# FINAL VERSION: This converter now handles all cases:
-# 1. 'me' keyword
-# 2. Mentions and cached member IDs
-# 3. Uncached user IDs (users not in the server)
-# 4. Searches for members in the server by name/nickname
-# 5. Searches the database for a matching In-Game Name (IGN)
 class PlayerConverter(commands.Converter):
     async def convert(self, ctx, argument):
         # 1. Handle 'me'
@@ -142,9 +131,9 @@ class PlayerConverter(commands.Converter):
             # 3. Try fetching user by raw ID
             if argument.isdigit():
                 try:
-                    return await bot.fetch_user(int(argument))
+                    return await ctx.bot.fetch_user(int(argument))
                 except discord.NotFound:
-                    pass  # Not a valid user ID, proceed to name search
+                    pass
 
             # 4. Try searching members in the current server by name
             lower_arg = argument.lower()
@@ -159,14 +148,11 @@ class PlayerConverter(commands.Converter):
             found_id = get_discord_id_for_ign(argument)
             if found_id:
                 try:
-                    return await bot.fetch_user(int(found_id))
+                    return await ctx.bot.fetch_user(int(found_id))
                 except discord.NotFound:
-                    # The user associated with the IGN might have deleted their account
                     pass
 
-            # If all attempts fail, raise the error
             raise commands.BadArgument(f'User or IGN "{argument}" not found.')
-
 
 # --- ADMIN COMMANDS ---
 
@@ -343,6 +329,26 @@ async def ingest_text_cmd(ctx, queue_num: str, *, scoreboard_text: str = None):
     except Exception as e:
         print(f"Error in ingest_text: {e}")
         await ctx.send(f"Error processing match data: {e}")
+
+
+@bot.command(name="delete_match", help="Permanently delete a match by its ID. Execs only.")
+@commands.check(is_exec)
+async def delete_match_cmd(ctx, match_id: int):
+    try:
+        # Call the new database function
+        deleted_rows_count = delete_match(match_id)
+
+        if deleted_rows_count > 0:
+            await ctx.send(f"✅ Successfully deleted Match ID `{match_id}` and its associated data. "
+                         f"({deleted_rows_count} total records removed).")
+        else:
+            await ctx.send(f"⚠️ Match ID `{match_id}` could not be found in the database.")
+            
+    except ValueError:
+        await ctx.send("❌ Invalid Match ID. Please provide a number.")
+    except Exception as e:
+        print(f"Error in delete_match command: {e}")
+        await ctx.send(f"An unexpected error occurred while trying to delete Match ID `{match_id}`.")
 # --- USER COMMANDS ---
 
 class LinkConfirmView(View):
