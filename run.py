@@ -1147,40 +1147,12 @@ class QueueNumModal(Modal):
                 await interaction.response.send_message(f"Queue number {queue_num} already exists.", ephemeral=True)
                 return
 
-            # --- RE-IMPLEMENTED SAFETY CHECK ---
-            # This logic now runs before inserting the scoreboard.
-            discord_ids = read_embeds(int(queue_num))
-            if not discord_ids:
-                await interaction.response.send_message(
-                    f"❌ **Match Not Recorded.** Could not find the original NeatQueue embed for Queue `{queue_num}`. "
-                    "Player registration cannot be verified.",
-                    ephemeral=True
-                )
-                return
+            # --- SAFETY CHECK REMOVED ---
+            # The check for unlinked players has been removed. The bot will now
+            # record stats for all players, creating placeholder profiles for
+            # those who have not yet used the `!link` command.
 
-            ign_list = [player["name"] for player in match_data["players"]]
-            
-            _, igns_not_registered = get_registered_igns(ign_list)
-            _, unregistered_discords = verify_registered_users(discord_ids)
-
-            warning_msgs = []
-            if unregistered_discords:
-                mentions = ", ".join([f"<@{d}>" for d in unregistered_discords])
-                warning_msgs.append(f"**Unlinked Discord Accounts:** {mentions}")
-            if igns_not_registered:
-                igns = ", ".join(f"`{ign}`" for ign in igns_not_registered)
-                warning_msgs.append(f"**Unlinked IGNs:** {igns}")
-
-            # If any players are unlinked, block the insertion and send a detailed error.
-            if warning_msgs:
-                await interaction.response.send_message(
-                    "**❌ Match Not Recorded.** The following players must link their accounts first using `!link <ign>`:\n\n" + "\n".join(warning_msgs),
-                    ephemeral=True
-                )
-                return
-            # --- END OF SAFETY CHECK ---
-
-            # If all checks pass, insert the data.
+            # Insert the data directly.
             insert_scoreboard(match_data, int(queue_num))
             await interaction.response.send_message(f"✅ Match {match_id} for queue {queue_num} successfully recorded.", ephemeral=True)
 
@@ -1252,26 +1224,27 @@ async def on_message(message):
 
                 # Step 4: Perform Safety Checks
                 # Check 1: Prevent duplicate matches
-                # --- THIS IS THE CHANGED BLOCK ---
                 if match_exists(match_id):
                     await message.channel.send(f"⚠️ Match `{match_id}` has already been recorded.")
                     return # Stop processing to avoid duplicates
 
-                # Check 2: Verify all players in the match are linked
+                # --- MODIFIED BEHAVIOR FOR UNLINKED PLAYERS ---
+                # Check 2: Identify any unlinked players to issue a non-blocking warning.
                 ign_list = [player["name"] for player in match_data["players"]]
                 _, igns_not_registered = get_registered_igns(ign_list)
 
+                # If players are not registered, send a warning but DO NOT stop the process.
                 if igns_not_registered:
                     unlinked_players = ", ".join(f"`{ign}`" for ign in igns_not_registered)
-                    error_msg = (
-                        f"❌ **Match `{match_id}` Not Recorded.**\n"
-                        f"The following players must link their accounts with `!link <ign>` first:\n"
-                        f"{unlinked_players}"
+                    warning_msg = (
+                        f"⚠️ **Warning for Match `{match_id}`:** The following players' stats have been recorded "
+                        f"but are not yet linked to a Discord account. They should use `!link <ign>` to claim their stats:\n"
+                        f"▶️ {unlinked_players}"
                     )
-                    await message.channel.send(error_msg)
-                    return
+                    await message.channel.send(warning_msg)
+                # --- END OF MODIFIED BEHAVIOR ---
 
-                # Step 5: If all checks pass, insert the data into the database
+                # Step 5: Insert the data into the database regardless of link status
                 insert_scoreboard(match_data, match_id)
                 
                 # Step 6: Send a public confirmation message
