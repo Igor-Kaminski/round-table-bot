@@ -784,8 +784,6 @@ async def history_cmd(ctx, *args):
     await ctx.send(f"```diff\n{output}\n```")
 
 
-# --- FULLY UPDATED HELP MESSAGE FOR LEADERBOARD ---
-# MODIFIED: Changed default min games to 1
 LEADERBOARD_HELP = """
 Shows player rankings, with optional filters for champions or roles.
 
@@ -801,11 +799,14 @@ Shows player rankings, with optional filters for champions or roles.
 **Available Stats:**
 - `winrate` (or `wr`): Overall Winrate
 - `kda`: Kill/Death/Assist Ratio
+- `kpm`: Kills per Minute
+- `deaths_pm`: Deaths per Minute
 - `dmg` (or `dpm`): Damage per Minute
 - `taken_pm`: Damage Taken per Minute
 - `heal_pm`: Healing per Minute
 - `self_heal_pm`: Self Healing per Minute
 - `creds_pm`: Credits per Minute
+- `avg_deaths`: Average Deaths per Match
 - `avg_dmg`: Average Damage per Match
 - `avg_taken`: Average Damage Taken per Match
 - `delta`: Average Damage Delta (Dealt - Taken)
@@ -817,7 +818,7 @@ Shows player rankings, with optional filters for champions or roles.
 
 **Examples:**
 - `!lb`: Shows the top 20 players by Winrate.
-- `!lb kda fernando 10`: Top 10 KDA players on Fernando.
+- `!lb kpm fernando 10`: Top 10 Kills/Min players on Fernando.
 - `!lb dmg support`: Top 20 damage dealers playing Support champions.
 - `!lb wr flank -b`: Bottom 20 winrate players on Flank champions.
 - `!lb wr -m 50`: Top 20 winrate players with at least 50 games played.
@@ -829,11 +830,14 @@ async def leaderboard_cmd(ctx, *args):
     stat_map = {
         "winrate": ("Winrate", "winrate", lambda v, s: f"{v:.2f}% ({s['wins']}-{s['losses']})"),
         "kda": ("KDA Ratio", "kda", lambda v, s: f"{v:.2f} ({s['k']}/{s['d']}/{s['a']})"),
+        "kpm": ("Kills/Min", "kills_pm", lambda v, s: f"{v:.2f}"),
+        "deaths_pm": ("Deaths/Min", "deaths_pm", lambda v, s: f"{v:.2f}"),
         "dmg_pm": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
         "taken_pm": ("Damage Taken/Min", "damage_taken_pm", lambda v, s: f"{int(v):,}"),
         "heal_pm": ("Healing/Min", "healing_pm", lambda v, s: f"{int(v):,}"),
         "self_heal_pm": ("Self Healing/Min", "self_healing_pm", lambda v, s: f"{int(v):,}"),
         "creds_pm": ("Credits/Min", "credits_pm", lambda v, s: f"{int(v):,}"),
+        "avg_deaths": ("AVG Deaths", "avg_deaths", lambda v, s: f"{v:.2f}"),
         "avg_dmg": ("AVG Damage Dealt", "avg_damage_dealt", lambda v, s: f"{int(v):,}"),
         "avg_taken": ("AVG Damage Taken", "avg_damage_taken", lambda v, s: f"{int(v):,}"),
         "delta": ("AVG Damage Delta", "damage_delta", lambda v, s: f"{int(v):,}"),
@@ -846,6 +850,7 @@ async def leaderboard_cmd(ctx, *args):
         "dmg": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
         "dpm": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
         "wr": ("Winrate", "winrate", lambda v, s: f"{v:.2f}% ({s['wins']}-{s['losses']})"),
+        "hpm": ("Healing/Min", "healing_pm", lambda v, s: f"{int(v):,}"),
     }
     
     # --- 1. Argument Parsing ---
@@ -854,7 +859,7 @@ async def leaderboard_cmd(ctx, *args):
     show_bottom = False
     champion_filter = None
     role_filter = None
-    min_games = None 
+    min_games = None
     
     valid_roles = {role.lower() for role in CHAMPION_ROLES.values()}
     # NEW: Alias mapping for roles.
@@ -911,7 +916,7 @@ async def leaderboard_cmd(ctx, *args):
     # --- 2. Fetch Data ---
     display_name, data_key, formatter = stat_map[stat_alias]
     leaderboard_data = get_leaderboard(
-        data_key, limit, show_bottom,  
+        data_key, limit, show_bottom,
         champion=champion_filter, role=role_filter, min_games=min_games
     )
     if not leaderboard_data:
