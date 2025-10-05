@@ -438,45 +438,85 @@ def get_player_id(discord_id):
 def get_player_stats(player_id, champions=None):
     """
     Fetches aggregated player stats.
-    Can be filtered by a list of champions.
+    If no champion/role filter is provided, 'healing' stats are calculated
+    from games played on Support champions only, while 'self_healing' uses all games.
     """
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
+    
     try:
-        query = """
-            SELECT
-                ps.kills, ps.deaths, ps.assists, ps.damage, ps.objective_time,
-                ps.shielding, ps.healing, m.time,
-                CASE
-                    WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1
-                    ELSE 0
-                END AS win,
-                ps.credits, ps.taken, ps.self_healing
-            FROM player_stats ps
-            JOIN matches m ON ps.match_id = m.match_id
-            WHERE ps.player_id = ?
-        """
-        params = [player_id]
-
-        # MODIFIED: Now accepts a list of champions
+        # --- Case 1: A specific filter (champion or role) IS provided ---
         if champions and isinstance(champions, list):
             placeholders = ', '.join('?' for _ in champions)
-            query += f" AND ps.champ IN ({placeholders})"
-            params.extend(champions)
+            query = f"""
+                SELECT
+                    ps.kills, ps.deaths, ps.assists, ps.damage, ps.objective_time,
+                    ps.shielding, ps.healing, ps.self_healing, m.time,
+                    CASE
+                        WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1
+                        ELSE 0
+                    END AS win,
+                    ps.credits, ps.taken
+                FROM player_stats ps
+                JOIN matches m ON ps.match_id = m.match_id
+                WHERE ps.player_id = ? AND ps.champ IN ({placeholders})
+            """
+            params = [player_id] + champions
+            cursor.execute(query, params)
+            rows = cursor.fetchall()
+            if not rows:
+                return None
+            
+            (total_kills, total_deaths, total_assists, total_damage, total_obj_time, 
+             total_shielding, total_healing, total_self_healing, total_time_in_minutes, 
+             total_wins, total_credits, total_taken) = [sum(col) for col in zip(*rows)]
 
-        cursor.execute(query, params)
-        rows = cursor.fetchall()
-        if not rows:
-            return None
+        # --- Case 2: NO filter is provided (default view) ---
+        else:
+            # Step A: Get all non-healing stats from all games
+            query_all = """
+                SELECT
+                    ps.kills, ps.deaths, ps.assists, ps.damage, ps.objective_time,
+                    ps.shielding, ps.self_healing, m.time,
+                    CASE
+                        WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1
+                        ELSE 0
+                    END AS win,
+                    ps.credits, ps.taken
+                FROM player_stats ps
+                JOIN matches m ON ps.match_id = m.match_id
+                WHERE ps.player_id = ?
+            """
+            cursor.execute(query_all, (player_id,))
+            rows = cursor.fetchall()
+            if not rows:
+                return None
+            
+            (total_kills, total_deaths, total_assists, total_damage, total_obj_time,
+             total_shielding, total_self_healing, total_time_in_minutes, total_wins,
+             total_credits, total_taken) = [sum(col) for col in zip(*rows)]
 
-        total_kills, total_deaths, total_assists, total_damage, total_obj_time, total_shielding, total_healing, total_time_in_minutes, total_wins, total_credits, total_taken, total_self_healing = [sum(col) for col in zip(*rows)]
+            # Step B: Get 'healing' stats from Support games ONLY
+            support_champs = [champ for champ, role in CHAMPION_ROLES.items() if role == "Support"]
+            placeholders = ', '.join('?' for _ in support_champs)
+            query_healing = f"""
+                SELECT SUM(ps.healing), SUM(m.time)
+                FROM player_stats ps
+                JOIN matches m ON ps.match_id = m.match_id
+                WHERE ps.player_id = ? AND ps.champ IN ({placeholders})
+            """
+            cursor.execute(query_healing, [player_id] + support_champs)
+            healing_row = cursor.fetchone()
+            
+            total_healing = healing_row[0] or 0
+            support_time_in_minutes = healing_row[1] or 0
+        
+        # --- Common calculations for both cases ---
         games_played = len(rows)
         total_losses = games_played - total_wins
-        
-        if total_time_in_minutes == 0:
-            total_time_in_minutes = 1
 
-        return {
+        # Final dictionary assembly
+        stats_dict = {
             "games": games_played,
             "wins": total_wins,
             "losses": total_losses,
@@ -486,23 +526,35 @@ def get_player_stats(player_id, champions=None):
             "winrate": round((total_wins / games_played) * 100, 2) if games_played > 0 else 0,
             "kda": f"{total_kills}/{total_deaths}/{total_assists}",
             "kda_ratio": round((total_kills + total_assists) / max(1, total_deaths), 2),
-            "kills_pm": round(total_kills / total_time_in_minutes, 2),
-            "deaths_pm": round(total_deaths / total_time_in_minutes, 2),
-            "damage_dealt_pm": round(total_damage / total_time_in_minutes, 2),
-            "healing_pm": round(total_healing / total_time_in_minutes, 2),
-            "credits_pm": round(total_credits / total_time_in_minutes, 2),
-            "obj_time": round(total_obj_time / games_played, 2),
-            "avg_deaths": round(total_deaths / games_played, 2),
-            "avg_damage_dealt": round(total_damage / games_played),
-            "avg_damage_taken": round(total_taken / games_played),
-            "avg_healing": round(total_healing / games_played),
-            "avg_shielding": round(total_shielding / games_played),
-            "avg_credits": round(total_credits / games_played),
-            "self_healing_pm": round(total_self_healing / total_time_in_minutes, 2),
-            "damage_taken_pm": round(total_taken / total_time_in_minutes, 2),
-            "avg_self_healing": round(total_self_healing / games_played),
-            "damage_delta": round((total_damage - total_taken) / games_played),
+            "kills_pm": round(total_kills / max(1, total_time_in_minutes), 2),
+            "deaths_pm": round(total_deaths / max(1, total_time_in_minutes), 2),
+            "damage_dealt_pm": round(total_damage / max(1, total_time_in_minutes), 2),
+            "self_healing_pm": round(total_self_healing / max(1, total_time_in_minutes), 2),
+            "credits_pm": round(total_credits / max(1, total_time_in_minutes), 2),
+            "obj_time": round(total_obj_time / games_played, 2) if games_played > 0 else 0,
+            "avg_kills": round(total_kills / games_played, 2) if games_played > 0 else 0,
+            "avg_deaths": round(total_deaths / games_played, 2) if games_played > 0 else 0,
+            "avg_damage_dealt": round(total_damage / games_played) if games_played > 0 else 0,
+            "avg_damage_taken": round(total_taken / games_played) if games_played > 0 else 0,
+            "avg_self_healing": round(total_self_healing / games_played) if games_played > 0 else 0,
+            "avg_shielding": round(total_shielding / games_played) if games_played > 0 else 0,
+            "avg_credits": round(total_credits / games_played) if games_played > 0 else 0,
+            "damage_taken_pm": round(total_taken / max(1, total_time_in_minutes), 2),
+            "damage_delta": round((total_damage - total_taken) / games_played) if games_played > 0 else 0,
         }
+        
+        # Add 'healing' stats based on context
+        if champions: # Filtered case - use its own time and games
+            stats_dict["healing_pm"] = round(total_healing / max(1, total_time_in_minutes), 2)
+            stats_dict["avg_healing"] = round(total_healing / games_played) if games_played > 0 else 0
+        else: # Default case - use special support-only time and games
+            # To get avg_healing for supports, we need to count support games
+            cursor.execute(f"SELECT COUNT(*) FROM player_stats WHERE player_id = ? AND champ IN ({placeholders})", [player_id] + support_champs)
+            support_games_played = cursor.fetchone()[0] or 0
+            stats_dict["healing_pm"] = round(total_healing / max(1, support_time_in_minutes), 2)
+            stats_dict["avg_healing"] = round(total_healing / max(1, support_games_played))
+            
+        return stats_dict
     finally:
         conn.close()
 
@@ -663,6 +715,7 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
         "healing_pm": "SUM(CAST(ps.healing AS REAL)) / SUM(m.time)",
         "self_healing_pm": "SUM(CAST(ps.self_healing AS REAL)) / SUM(m.time)",
         "credits_pm": "SUM(CAST(ps.credits AS REAL)) / SUM(m.time)",
+        "avg_kills": "AVG(ps.kills)",
         "avg_deaths": "AVG(ps.deaths)",
         "avg_damage_dealt": "AVG(ps.damage)",
         "avg_damage_taken": "AVG(ps.taken)",
@@ -681,7 +734,11 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
 
     params = []
     where_conditions = ["p.discord_id IS NOT NULL", "m.time > 0"]
+    
+    # Define which stats should default to support-only
+    healing_only_stats = ["healing_pm", "avg_healing"]
 
+    # Apply role/champion filters
     if champion:
         where_conditions.append("ps.champ LIKE ?")
         params.append(f"%{champion}%")
@@ -689,7 +746,12 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
         champions_in_role = [c for c, r in CHAMPION_ROLES.items() if r == role]
         if not champions_in_role:
             return None
-        
+        placeholders = ', '.join('?' for _ in champions_in_role)
+        where_conditions.append(f"ps.champ IN ({placeholders})")
+        params.extend(champions_in_role)
+    # If no filter is given BUT it's a healing stat, default to Support
+    elif stat_key in healing_only_stats:
+        champions_in_role = [c for c, r in CHAMPION_ROLES.items() if r == "Support"]
         placeholders = ', '.join('?' for _ in champions_in_role)
         where_conditions.append(f"ps.champ IN ({placeholders})")
         params.extend(champions_in_role)

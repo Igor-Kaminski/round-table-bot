@@ -444,6 +444,7 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, filter_str: str = None
                 "Self Healing/Min": f"{int(role_stats['self_healing_pm']):,}",
                 "Credits/Min": f"{int(role_stats['credits_pm']):,}",
                 "--- Per Match ---": "",
+                "AVG Kills": f"{role_stats['avg_kills']:.2f}",
                 "AVG Deaths": f"{role_stats['avg_deaths']:.2f}",
                 "AVG Damage Dealt": f"{int(role_stats['avg_damage_dealt']):,}",
                 "AVG Damage Taken": f"{int(role_stats['avg_damage_taken']):,}",
@@ -489,6 +490,7 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, filter_str: str = None
                 "Healing/Min": f"{int(champ_stats['healing_pm']):,}",
                 "Self Healing/Min": f"{int(champ_stats['self_healing_pm']):,}",
                 "Credits/Min": f"{int(champ_stats['credits_pm']):,}",
+                "AVG Kills": f"{champ_stats['avg_kills']:.2f}",
                 "AVG Deaths": f"{champ_stats['avg_deaths']:.2f}",
                 "AVG Damage Dealt": f"{int(champ_stats['avg_damage_dealt']):,}",
                 "AVG Damage Taken": f"{int(champ_stats['avg_damage_taken']):,}",
@@ -532,6 +534,7 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, filter_str: str = None
             "Self Healing/Min": f"{int(stats['self_healing_pm']):,}",
             "Credits/Min": f"{int(stats['credits_pm']):,}",
             "--- Per Match ---": "",
+            "AVG Kills": f"{stats['avg_kills']:.2f}",
             "AVG Deaths": f"{stats['avg_deaths']:.2f}",
             "AVG Damage Dealt": f"{int(stats['avg_damage_dealt']):,}",
             "AVG Damage Taken": f"{int(stats['avg_damage_taken']):,}",
@@ -803,25 +806,23 @@ Shows player rankings, with optional filters for champions or roles.
 - `deaths_pm`: Deaths per Minute
 - `dmg` (or `dpm`): Damage per Minute
 - `taken_pm`: Damage Taken per Minute
-- `heal_pm`: Healing per Minute
+- `heal_pm`: Healing per Minute (Defaults to Supports)
 - `self_heal_pm`: Self Healing per Minute
 - `creds_pm`: Credits per Minute
+- `avg_kills`: Average Kills per Match
 - `avg_deaths`: Average Deaths per Match
 - `avg_dmg`: Average Damage per Match
 - `avg_taken`: Average Damage Taken per Match
 - `delta`: Average Damage Delta (Dealt - Taken)
-- `avg_heal`: Average Healing per Match
+- `avg_heal`: Average Healing per Match (Defaults to Supports)
 - `avg_self_heal`: Average Self Healing per Match
 - `avg_shield`: Average Shielding per Match
 - `avg_creds`: Average Credits per Match
 - `obj_time`: Average Objective Time per Match
 
 **Examples:**
-- `!lb`: Shows the top 20 players by Winrate.
-- `!lb kpm fernando 10`: Top 10 Kills/Min players on Fernando.
-- `!lb dmg support`: Top 20 damage dealers playing Support champions.
-- `!lb wr flank -b`: Bottom 20 winrate players on Flank champions.
-- `!lb wr -m 50`: Top 20 winrate players with at least 50 games played.
+- `!lb heal_pm`: Top 20 healers on Support champions.
+- `!lb heal_pm tank`: Top 20 healers on Tank champions.
 """
 
 @bot.command(name="leaderboard", aliases=["lb"], help=LEADERBOARD_HELP)
@@ -837,6 +838,7 @@ async def leaderboard_cmd(ctx, *args):
         "heal_pm": ("Healing/Min", "healing_pm", lambda v, s: f"{int(v):,}"),
         "self_heal_pm": ("Self Healing/Min", "self_healing_pm", lambda v, s: f"{int(v):,}"),
         "creds_pm": ("Credits/Min", "credits_pm", lambda v, s: f"{int(v):,}"),
+        "avg_kills": ("AVG Kills", "avg_kills", lambda v, s: f"{v:.2f}"),
         "avg_deaths": ("AVG Deaths", "avg_deaths", lambda v, s: f"{v:.2f}"),
         "avg_dmg": ("AVG Damage Dealt", "avg_damage_dealt", lambda v, s: f"{int(v):,}"),
         "avg_taken": ("AVG Damage Taken", "avg_damage_taken", lambda v, s: f"{int(v):,}"),
@@ -862,7 +864,6 @@ async def leaderboard_cmd(ctx, *args):
     min_games = None
     
     valid_roles = {role.lower() for role in CHAMPION_ROLES.values()}
-    # NEW: Alias mapping for roles.
     role_aliases = {'dmg': 'damage'}
     
     unprocessed_args = []
@@ -889,23 +890,19 @@ async def leaderboard_cmd(ctx, *args):
         else:
             unprocessed_args.append(arg)
         i += 1
-
-    # MODIFIED: This block now handles the 'dmg' alias.
+    
     if unprocessed_args:
         full_filter_str = " ".join(unprocessed_args).lower()
         
         matched_role = None
-        # First, check if the input is a specific alias like 'dmg'
         if full_filter_str in role_aliases:
             matched_role = role_aliases[full_filter_str]
         else:
-            # If not an alias, check if it's a partial match (e.g., 'suppo' for 'support')
             matched_role = next((role for role in valid_roles if role.startswith(full_filter_str)), None)
 
         if matched_role:
             role_filter = matched_role.capitalize()
         else:
-            # Otherwise, assume it's a champion filter
             champion_filter = full_filter_str
 
     limit = max(1, min(limit, 50))
@@ -921,6 +918,9 @@ async def leaderboard_cmd(ctx, *args):
     )
     if not leaderboard_data:
         filter_name = champion_filter.title() if champion_filter else role_filter if role_filter else ""
+        # Add a note if it's a healing stat and no filter was applied
+        if not filter_name and data_key in ["healing_pm", "avg_healing"]:
+             filter_name = "Supports"
         filter_msg = f" as {filter_name}" if filter_name else ""
         await ctx.send(f"Could not generate a leaderboard for `{display_name}`{filter_msg}. No qualified player data found.")
         return
@@ -954,7 +954,6 @@ async def leaderboard_cmd(ctx, *args):
     
     embed.description = "\n".join(description)
     await ctx.send(embed=embed)
-
 
 @bot.command(name="compare", help="Compare stats between two players.")
 async def compare_cmd(ctx, user1: PlayerConverter, user2: PlayerConverter = None):
