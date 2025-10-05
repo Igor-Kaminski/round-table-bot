@@ -431,18 +431,20 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, filter_str: str = None
 
             embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=target_user.display_avatar.url)
             
-            # RESTORED: Full stats layout for roles
             data = {
                 f"--- Role: {role_name} ({role_stats['games']} games) ---": "",
                 "Winrate": f"{role_stats['winrate']:.2f}% ({role_stats['wins']}-{role_stats['losses']})",
                 "KDA": f"{role_stats['kda_ratio']:.2f} ({role_stats['raw_k']}/{role_stats['raw_d']}/{role_stats['raw_a']})",
                 "--- Per Minute ---": "",
+                "Kills/Min": f"{role_stats['kills_pm']:.2f}",
+                "Deaths/Min": f"{role_stats['deaths_pm']:.2f}",
                 "Damage/Min": f"{int(role_stats['damage_dealt_pm']):,}",
                 "Damage Taken/Min": f"{int(role_stats['damage_taken_pm']):,}",
                 "Healing/Min": f"{int(role_stats['healing_pm']):,}",
                 "Self Healing/Min": f"{int(role_stats['self_healing_pm']):,}",
                 "Credits/Min": f"{int(role_stats['credits_pm']):,}",
                 "--- Per Match ---": "",
+                "AVG Deaths": f"{role_stats['avg_deaths']:.2f}",
                 "AVG Damage Dealt": f"{int(role_stats['avg_damage_dealt']):,}",
                 "AVG Damage Taken": f"{int(role_stats['avg_damage_taken']):,}",
                 "AVG Damage Delta": f"{int(role_stats['damage_delta']):,}",
@@ -468,7 +470,6 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, filter_str: str = None
                 await ctx.send(f"No stats found for {target_user.display_name} on {full_champion_name}.")
                 return
 
-            # RESTORED: Fetch global stats for comparison
             global_stats = get_player_stats(player_id)
 
             embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=target_user.display_avatar.url)
@@ -477,16 +478,18 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, filter_str: str = None
                 icon_file = discord.File(icon_path, filename="icon.png")
                 embed.set_thumbnail(url="attachment://icon.png")
             
-            # RESTORED: Full stats layout for champions
             champ_data = {
                 f"--- Champion: {full_champion_name} ---": "",
                 "Winrate": f"{champ_stats['winrate']:.2f}% ({champ_stats['wins']}-{champ_stats['losses']})",
                 "KDA": f"{champ_stats['kda_ratio']:.2f} ({champ_stats['raw_k']}/{champ_stats['raw_d']}/{champ_stats['raw_a']})",
+                "Kills/Min": f"{champ_stats['kills_pm']:.2f}",
+                "Deaths/Min": f"{champ_stats['deaths_pm']:.2f}",
                 "Damage/Min": f"{int(champ_stats['damage_dealt_pm']):,}",
                 "Damage Taken/Min": f"{int(champ_stats['damage_taken_pm']):,}",
                 "Healing/Min": f"{int(champ_stats['healing_pm']):,}",
                 "Self Healing/Min": f"{int(champ_stats['self_healing_pm']):,}",
                 "Credits/Min": f"{int(champ_stats['credits_pm']):,}",
+                "AVG Deaths": f"{champ_stats['avg_deaths']:.2f}",
                 "AVG Damage Dealt": f"{int(champ_stats['avg_damage_dealt']):,}",
                 "AVG Damage Taken": f"{int(champ_stats['avg_damage_taken']):,}",
                 "AVG Damage Delta": f"{int(champ_stats['damage_delta']):,}",
@@ -496,7 +499,6 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, filter_str: str = None
                 "AVG Credits": f"{int(champ_stats['avg_credits']):,}",
                 "AVG Objective Time": f"{int(champ_stats['obj_time']):,}",
             }
-            # RESTORED: Global stats section
             global_data = {
                 "--- Global Stats ---": "",
                 "Global Winrate": f"{global_stats['winrate']:.2f}% ({global_stats['wins']}-{global_stats['losses']})",
@@ -518,17 +520,19 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, filter_str: str = None
         embed.title = f"Stats for {target_user.display_name}"
         embed.set_thumbnail(url=target_user.display_avatar.url)
 
-        # RESTORED: Full stats layout for general stats
         data = {
             "Winrate": f"{stats['winrate']:.2f}% ({stats['wins']}-{stats['losses']})",
             "KDA": f"{stats['kda_ratio']:.2f} ({stats['raw_k']}/{stats['raw_d']}/{stats['raw_a']})",
             "--- Per Minute ---": "",
+            "Kills/Min": f"{stats['kills_pm']:.2f}",
+            "Deaths/Min": f"{stats['deaths_pm']:.2f}",
             "Damage/Min": f"{int(stats['damage_dealt_pm']):,}",
             "Damage Taken/Min": f"{int(stats['damage_taken_pm']):,}",
             "Healing/Min": f"{int(stats['healing_pm']):,}",
             "Self Healing/Min": f"{int(stats['self_healing_pm']):,}",
             "Credits/Min": f"{int(stats['credits_pm']):,}",
             "--- Per Match ---": "",
+            "AVG Deaths": f"{stats['avg_deaths']:.2f}",
             "AVG Damage Dealt": f"{int(stats['avg_damage_dealt']):,}",
             "AVG Damage Taken": f"{int(stats['avg_damage_taken']):,}",
             "AVG Damage Delta": f"{int(stats['damage_delta']):,}",
@@ -546,7 +550,7 @@ async def stats_cmd(ctx, user: PlayerConverter = None, *, filter_str: str = None
     fetch_time = (time.monotonic() - start_time) * 1000
     footer_text = f"Fetched in {fetch_time:.0f}ms"
     if not filter_str:
-        footer_text = f"Player ID: {target_user.id}  •  {footer_text}"
+        footer_text = f"Player ID: {target_user.id}    •   {footer_text}"
     embed.set_footer(text=footer_text, icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
 
     await ctx.send(embed=embed, file=icon_file)
