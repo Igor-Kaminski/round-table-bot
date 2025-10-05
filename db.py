@@ -486,10 +486,13 @@ def get_player_stats(player_id, champions=None):
             "winrate": round((total_wins / games_played) * 100, 2) if games_played > 0 else 0,
             "kda": f"{total_kills}/{total_deaths}/{total_assists}",
             "kda_ratio": round((total_kills + total_assists) / max(1, total_deaths), 2),
+            "kills_pm": round(total_kills / total_time_in_minutes, 2),
+            "deaths_pm": round(total_deaths / total_time_in_minutes, 2),
             "damage_dealt_pm": round(total_damage / total_time_in_minutes, 2),
             "healing_pm": round(total_healing / total_time_in_minutes, 2),
             "credits_pm": round(total_credits / total_time_in_minutes, 2),
             "obj_time": round(total_obj_time / games_played, 2),
+            "avg_deaths": round(total_deaths / games_played, 2),
             "avg_damage_dealt": round(total_damage / games_played),
             "avg_damage_taken": round(total_taken / games_played),
             "avg_healing": round(total_healing / games_played),
@@ -649,16 +652,18 @@ CHAMPION_ROLES = {
     "Pip": "Support", "Rei": "Support", "Seris": "Support", "Ying": "Support",
 }
 
-# MODIFIED: Default in signature updated to 1 for consistency.
 def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None, min_games=1):
     stat_expressions = {
         "winrate": "SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) * 100.0 / COUNT(ps.match_id)",
         "kda": "CAST(SUM(ps.kills) + SUM(ps.assists) AS REAL) / MAX(1, SUM(ps.deaths))",
+        "kills_pm": "SUM(CAST(ps.kills AS REAL)) / SUM(m.time)",
+        "deaths_pm": "SUM(CAST(ps.deaths AS REAL)) / SUM(m.time)",
         "damage_dealt_pm": "SUM(CAST(ps.damage AS REAL)) / SUM(m.time)",
         "damage_taken_pm": "SUM(CAST(ps.taken AS REAL)) / SUM(m.time)",
         "healing_pm": "SUM(CAST(ps.healing AS REAL)) / SUM(m.time)",
         "self_healing_pm": "SUM(CAST(ps.self_healing AS REAL)) / SUM(m.time)",
         "credits_pm": "SUM(CAST(ps.credits AS REAL)) / SUM(m.time)",
+        "avg_deaths": "AVG(ps.deaths)",
         "avg_damage_dealt": "AVG(ps.damage)",
         "avg_damage_taken": "AVG(ps.taken)",
         "damage_delta": "AVG(ps.damage - ps.taken)",
