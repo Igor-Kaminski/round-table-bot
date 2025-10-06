@@ -28,3 +28,5 @@ ROLE_ALIASES = {
     'tank': 'Tank', 'frontline': 'Tank',
     'flank': 'Flank',
 }
+
+ALLOWED_CHANNELS = ["match-results", "admin"]
