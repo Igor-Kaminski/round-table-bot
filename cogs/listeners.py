@@ -195,7 +195,7 @@ class Listeners(commands.Cog):
 
     async def match_results_id_ocr(self, message):
         # --- AUTOMATED MATCH ID PROCESSING ---
-        if message.author == self.bot.user:
+        if message.author == self.bot.user or message.channel.name != "match-results":
             return
 
         if message.attachments:
