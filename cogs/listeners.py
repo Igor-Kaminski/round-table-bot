@@ -12,7 +12,8 @@ from db import (
     get_registered_igns,
     insert_embed,
 )
-
+import easyocr
+import tempfile
 
 def parse_match_textbox(text):
     """Parses match scoreboard text into structured data."""
@@ -95,6 +96,124 @@ def parse_match_textbox(text):
 class Listeners(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.reader = easyocr.Reader(['en'])
+
+    async def scoreboard_ingestion(self, message):
+        # --- FULLY AUTOMATED SCOREBOARD INGESTION ---
+        if message.author.name == "PaladinsAssistant" and message.author.discriminator == "2894":
+
+            # Step 1: Safely combine message parts to get the full raw text
+            raw_text = ""
+            if message.embeds:
+                embed = message.embeds[0]
+                parts = []
+                if embed.title: parts.append(embed.title)
+                if embed.description: parts.append(embed.description)
+                raw_text = "\n".join(parts)
+            else:
+                raw_text = message.content
+
+            if not raw_text.strip():
+                return  # Ignore empty messages
+
+            # Step 2: Intelligently find the start of the scoreboard data
+            lines = raw_text.strip().split('\n')
+            start_index = -1
+            for i, line in enumerate(lines):
+                if re.match(r'^\s*\d{9,12}\s*,', line.strip()):
+                    start_index = i
+                    break
+
+            if start_index == -1:
+                return
+
+            raw_scoreboard_text = "\n".join(lines[start_index:])
+            cleaned_text = raw_scoreboard_text.strip().strip("`")
+
+            # Step 3: Parse the cleaned text into structured data
+            try:
+                match_data = parse_match_textbox(cleaned_text)
+                match_id = match_data["match_id"]
+            except ValueError as e:
+                await message.channel.send(f"⚠️ **Could not parse scoreboard.**\n**Reason:** {e}")
+                return
+
+            # Step 4: Perform Safety Checks
+            # Check 1: Prevent duplicate matches
+            if match_exists(match_id):
+                await message.channel.send(f"⚠️ Match `{match_id}` has already been recorded.")
+                return  # Stop processing to avoid duplicates
+
+            # --- MODIFIED BEHAVIOR FOR UNLINKED PLAYERS ---
+            # Check 2: Identify any unlinked players to issue a non-blocking warning.
+            ign_list = [player["name"] for player in match_data["players"]]
+            _, igns_not_registered = get_registered_igns(ign_list)
+
+            # If players are not registered, send a warning but DO NOT stop the process.
+            if igns_not_registered:
+                unlinked_players = ", ".join(f"`{ign}`" for ign in igns_not_registered)
+                warning_msg = (
+                    f"⚠️ **Warning for Match `{match_id}`:** The following players' stats have been recorded "
+                    f"but are not yet linked to a Discord account. They should use `!link <ign>` to claim their stats:\n"
+                    f"▶️ {unlinked_players}"
+                )
+                await message.channel.send(warning_msg)
+            # --- END OF MODIFIED BEHAVIOR ---
+
+            # Step 5: Insert the data into the database regardless of link status
+            insert_scoreboard(match_data, match_id)
+
+            # Step 6: Send a public confirmation message
+            await message.channel.send(f"✅ **Match `{match_id}` successfully recorded.**")
+            print(f"Successfully ingested match {match_id}.")
+
+        # --- This part saves NeatQueue embeds for player verification ---
+        elif message.author.name == "NeatQueue" and message.author.discriminator == "0850" and message.embeds:
+            for embed in message.embeds:
+                queue_number_match = re.search(r"Queue #?(\d+)", embed.title or "") or re.search(r"Queue #?(\d+)",
+                                                                                                 embed.description or "")
+                if queue_number_match:
+                    queue_number = queue_number_match.group(1)
+                    insert_embed(queue_number, embed.to_dict())
+
+    def get_match_id(self, img):
+        # --- (HELPER) OCR IMAGE PROCESSING ---
+
+        # Read and store text from the image
+        results = self.reader.readtext(img)
+        for _, text, prob in results:
+
+            # Search for the match id ('ID ' and ten digits)
+            found_id = re.search(r'ID\s\d{10}', text)
+            if found_id:
+
+                # Return the match id or None if not found
+                match_id = int(text[3:13])
+                return match_id
+
+        return None
+
+    async def match_results_id_ocr(self, message):
+        # --- AUTOMATED MATCH ID PROCESSING ---
+        if message.author == self.bot.user:
+            return
+
+        if message.attachments:
+            for attachment in message.attachments:
+
+                # Temporarily save attachments with the following file extensions
+                if attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
+                    with tempfile.NamedTemporaryFile(delete=True, suffix=attachment.filename) as temp_img:
+                        await attachment.save(temp_img.name)
+
+                        # Attempt to extract the match id from the image
+                        match_id = self.get_match_id(temp_img.name)
+
+                        # Send the match id in the chat if it was successfully extracted
+                        if match_id:
+                            await message.channel.send(f"Match ID: {match_id}")
+                        else:
+                            await message.channel.send("Match ID not found.")
 
     @commands.Cog.listener()
     async def on_message(self, message):
@@ -104,82 +223,8 @@ class Listeners(commands.Cog):
         
         try:
             if isinstance(message.channel, discord.TextChannel) and message.channel.name in ALLOWED_CHANNELS:
-                
-                # --- FULLY AUTOMATED SCOREBOARD INGESTION ---
-                if message.author.name == "PaladinsAssistant" and message.author.discriminator == "2894":
-                    
-                    # Step 1: Safely combine message parts to get the full raw text
-                    raw_text = ""
-                    if message.embeds:
-                        embed = message.embeds[0]
-                        parts = []
-                        if embed.title: parts.append(embed.title)
-                        if embed.description: parts.append(embed.description)
-                        raw_text = "\n".join(parts)
-                    else:
-                        raw_text = message.content
-
-                    if not raw_text.strip():
-                        return # Ignore empty messages
-
-                    # Step 2: Intelligently find the start of the scoreboard data
-                    lines = raw_text.strip().split('\n')
-                    start_index = -1
-                    for i, line in enumerate(lines):
-                        if re.match(r'^\s*\d{9,12}\s*,', line.strip()):
-                            start_index = i
-                            break
-                    
-                    if start_index == -1:
-                        return 
-
-                    raw_scoreboard_text = "\n".join(lines[start_index:])
-                    cleaned_text = raw_scoreboard_text.strip().strip("`")
-                    
-                    # Step 3: Parse the cleaned text into structured data
-                    try:
-                        match_data = parse_match_textbox(cleaned_text)
-                        match_id = match_data["match_id"]
-                    except ValueError as e:
-                        await message.channel.send(f"⚠️ **Could not parse scoreboard.**\n**Reason:** {e}")
-                        return
-
-                    # Step 4: Perform Safety Checks
-                    # Check 1: Prevent duplicate matches
-                    if match_exists(match_id):
-                        await message.channel.send(f"⚠️ Match `{match_id}` has already been recorded.")
-                        return # Stop processing to avoid duplicates
-
-                    # --- MODIFIED BEHAVIOR FOR UNLINKED PLAYERS ---
-                    # Check 2: Identify any unlinked players to issue a non-blocking warning.
-                    ign_list = [player["name"] for player in match_data["players"]]
-                    _, igns_not_registered = get_registered_igns(ign_list)
-
-                    # If players are not registered, send a warning but DO NOT stop the process.
-                    if igns_not_registered:
-                        unlinked_players = ", ".join(f"`{ign}`" for ign in igns_not_registered)
-                        warning_msg = (
-                            f"⚠️ **Warning for Match `{match_id}`:** The following players' stats have been recorded "
-                            f"but are not yet linked to a Discord account. They should use `!link <ign>` to claim their stats:\n"
-                            f"▶️ {unlinked_players}"
-                        )
-                        await message.channel.send(warning_msg)
-                    # --- END OF MODIFIED BEHAVIOR ---
-
-                    # Step 5: Insert the data into the database regardless of link status
-                    insert_scoreboard(match_data, match_id)
-                    
-                    # Step 6: Send a public confirmation message
-                    await message.channel.send(f"✅ **Match `{match_id}` successfully recorded.**")
-                    print(f"Successfully ingested match {match_id}.")
-
-                # --- This part saves NeatQueue embeds for player verification ---
-                elif message.author.name == "NeatQueue" and message.author.discriminator == "0850" and message.embeds:
-                    for embed in message.embeds:
-                        queue_number_match = re.search(r"Queue #?(\d+)", embed.title or "") or re.search(r"Queue #?(\d+)", embed.description or "")
-                        if queue_number_match:
-                            queue_number = queue_number_match.group(1)
-                            insert_embed(queue_number, embed.to_dict())
+                await self.scoreboard_ingestion(message)
+                await self.match_results_id_ocr(message)
 
         except Exception as e:
             print(f"Error in on_message processing: {e}")
