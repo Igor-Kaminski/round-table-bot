@@ -929,3 +929,110 @@ def delete_match(match_id):
         return 0
     finally:
         conn.close()
+
+
+def get_champion_leaderboard(stat_key, limit, show_bottom=False, role=None, min_games=1):
+    """
+    Gets leaderboard of champions (not players) aggregated across all games.
+    Shows which champions have the best stats overall.
+    """
+    # CORRECTED: The 'ps.' alias has been replaced with 'ms.' to match the query below.
+    stat_expressions = {
+        "winrate": "SUM(CASE WHEN (ms.team = 1 AND m.team1_score > m.team2_score) OR (ms.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) * 100.0 / COUNT(ms.match_id)",
+        "kda": "CAST(SUM(ms.kills) + SUM(ms.assists) AS REAL) / MAX(1, SUM(ms.deaths))",
+        "kills_pm": "SUM(CAST(ms.kills AS REAL)) / SUM(m.time)",
+        "deaths_pm": "SUM(CAST(ms.deaths AS REAL)) / SUM(m.time)",
+        "damage_dealt_pm": "SUM(CAST(ms.damage AS REAL)) / SUM(m.time)",
+        "damage_taken_pm": "SUM(CAST(ms.taken AS REAL)) / SUM(m.time)",
+        "healing_pm": "SUM(CAST(ms.healing AS REAL)) / SUM(m.time)",
+        "self_healing_pm": "SUM(CAST(ms.self_healing AS REAL)) / SUM(m.time)",
+        "credits_pm": "SUM(CAST(ms.credits AS REAL)) / SUM(m.time)",
+        "avg_kills": "AVG(ms.kills)",
+        "avg_deaths": "AVG(ms.deaths)",
+        "avg_damage_dealt": "AVG(ms.damage)",
+        "avg_damage_taken": "AVG(ms.taken)",
+        "damage_delta": "AVG(ms.damage - ms.taken)",
+        "avg_healing": "AVG(ms.healing)",
+        "avg_self_healing": "AVG(ms.self_healing)",
+        "avg_shielding": "AVG(ms.shielding)",
+        "avg_credits": "AVG(ms.credits)",
+        "obj_time": "AVG(ms.objective_time)",
+        "kp": "AVG(ms.kill_share)",
+        "dmg_share": "AVG(ms.damage_share)",
+    }
+
+    if stat_key not in stat_expressions:
+        return None
+
+    order = "ASC" if show_bottom else "DESC"
+    params = []
+    # CORRECTED: This alias was also incorrect in the original code. It should be ms.champ or ps.champ. 
+    # Since the main table is ms, we'll check it, but since it's filtered before this CTE, we can just check champ.
+    where_conditions = ["m.time > 0"] 
+    
+    if role:
+        champions_in_role = [c for c, r in CHAMPION_ROLES.items() if r == role]
+        if not champions_in_role:
+            return None
+        placeholders = ', '.join('?' for _ in champions_in_role)
+        # Use 'ms.champ' here to be explicit
+        where_conditions.append(f"ms.champ IN ({placeholders})")
+        params.extend(champions_in_role)
+
+    where_clause = " AND ".join(where_conditions)
+    final_params = params + [min_games, limit]
+
+    query = f"""
+        WITH TeamTotals AS (
+            SELECT match_id, team, SUM(kills) as team_kills, SUM(damage) as team_damage
+            FROM player_stats GROUP BY match_id, team
+        ),
+        MatchShares AS (
+            SELECT 
+                ps.*,
+                CASE WHEN tt.team_kills > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kills ELSE 0 END as kill_share,
+                CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END as damage_share
+            FROM player_stats ps
+            JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
+        ),
+        ChampionAggregates AS (
+            SELECT
+                ms.champ,
+                COUNT(ms.match_id) AS games_played,
+                SUM(CASE WHEN (ms.team = 1 AND m.team1_score > m.team2_score) OR (ms.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) as wins,
+                SUM(ms.kills) as total_k,
+                SUM(ms.deaths) as total_d,
+                SUM(ms.assists) as total_a,
+                ({stat_expressions[stat_key]}) AS value
+            FROM MatchShares ms
+            JOIN matches m ON ms.match_id = m.match_id
+            WHERE {where_clause}
+            GROUP BY ms.champ
+            HAVING games_played >= ?
+        )
+        SELECT
+            ca.champ,
+            ca.value,
+            ca.wins,
+            ca.games_played,
+            (ca.games_played - ca.wins) AS losses,
+            ca.total_k as k,
+            ca.total_d as d,
+            ca.total_a as a,
+            (SELECT COUNT(*) FROM ChampionAggregates) as total_champions
+        FROM ChampionAggregates ca
+        ORDER BY ca.value {order}, ca.games_played DESC
+        LIMIT ?;
+    """
+
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        cursor.execute(query, tuple(final_params))
+        return [dict(row) for row in cursor.fetchall()]
+    except sqlite3.Error as e:
+        print(f"Database error in get_champion_leaderboard: {e}")
+        return None
+    finally:
+        conn.close()

@@ -14,6 +14,7 @@ from db import (
     get_all_champion_stats,
     get_match_history,
     get_leaderboard,
+    get_champion_leaderboard,
     compare_players,
     get_top_champs,
 )
@@ -549,6 +550,169 @@ Shows player rankings, with optional filters for champions or roles.
             inline=False
         )
         
+        await ctx.send(embed=embed)
+
+    CHAMPION_LEADERBOARD_HELP = """
+Shows champion rankings aggregated across all players.
+
+**Usage:** `!champ_lb [stat] [role] [limit] [-b] [-m <games>]`
+
+**Arguments:**
+- `[stat]`: The statistic to rank by. Defaults to `winrate`.
+- `[role]`: Filter by a role (`damage`, `flank`, `tank`, `support`).
+- `[limit]`: The number of champions to show. Defaults to `20`.
+- `[-b]`: Optional flag to show the bottom of the leaderboard.
+- `[-m <games>]`: Optional flag to set a minimum number of games to qualify. Defaults to 1.
+
+**Available Stats:**
+- `winrate` (or `wr`): Overall Winrate
+- `kda`: Kill/Death/Assist Ratio
+- `kp`: Kill Participation (% of team kills + assists)
+- `dmg_share`: Damage Share (% of team damage)
+- `kpm`: Kills per Minute
+- `deaths_pm`: Deaths per Minute
+- `dmg` (or `dpm`): Damage per Minute
+- `taken_pm`: Damage Taken per Minute
+- `heal_pm`: Healing per Minute
+- `self_heal_pm`: Self Healing per Minute
+- `creds_pm`: Credits per Minute
+- `avg_kills`: Average Kills per Match
+- `avg_deaths`: Average Deaths per Match
+- `avg_dmg`: Average Damage per Match
+- `avg_taken`: Average Damage Taken per Match
+- `delta`: Average Damage Delta (Dealt - Taken)
+- `avg_heal`: Average Healing per Match
+- `avg_self_heal`: Average Self Healing per Match
+- `avg_shield`: Average Shielding per Match
+- `avg_creds`: Average Credits per Match
+- `obj_time`: Average Objective Time per Match
+
+**Examples:**
+- `!clb dmg`: Top 20 champions by damage per minute.
+- `!clb winrate tank`: Top 20 tanks by winrate.
+- `!clb kp -m 50`: Top champions by kill participation (min 50 games).
+- `!clb deaths_pm -b`: Bottom 20 champions by deaths per minute.
+"""
+
+    @commands.command(name="champ_lb", aliases=["clb", "champleaderboard"], help=CHAMPION_LEADERBOARD_HELP)
+    async def champion_leaderboard_cmd(self, ctx, *args):
+        # --- Stat Mapping (Same as player leaderboard) ---
+        stat_map = {
+            "winrate": ("Winrate", "winrate", lambda v, s: f"{v:.2f}% ({s['wins']}-{s['losses']})"),
+            "kda": ("KDA Ratio", "kda", lambda v, s: f"{v:.2f} ({s['k']}/{s['d']}/{s['a']})"),
+            "kp": ("Kill Participation", "kp", lambda v, s: f"{v:.2f}%"),
+            "dmg_share": ("Damage Share", "dmg_share", lambda v, s: f"{v:.2f}%"),
+            "kpm": ("Kills/Min", "kills_pm", lambda v, s: f"{v:.2f}"),
+            "deaths_pm": ("Deaths/Min", "deaths_pm", lambda v, s: f"{v:.2f}"),
+            "dmg_pm": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
+            "taken_pm": ("Damage Taken/Min", "damage_taken_pm", lambda v, s: f"{int(v):,}"),
+            "heal_pm": ("Healing/Min", "healing_pm", lambda v, s: f"{int(v):,}"),
+            "self_heal_pm": ("Self Healing/Min", "self_healing_pm", lambda v, s: f"{int(v):,}"),
+            "creds_pm": ("Credits/Min", "credits_pm", lambda v, s: f"{int(v):,}"),
+            "avg_kills": ("AVG Kills", "avg_kills", lambda v, s: f"{v:.2f}"),
+            "avg_deaths": ("AVG Deaths", "avg_deaths", lambda v, s: f"{v:.2f}"),
+            "avg_dmg": ("AVG Damage Dealt", "avg_damage_dealt", lambda v, s: f"{int(v):,}"),
+            "avg_taken": ("AVG Damage Taken", "avg_damage_taken", lambda v, s: f"{int(v):,}"),
+            "delta": ("AVG Damage Delta", "damage_delta", lambda v, s: f"{int(v):,}"),
+            "avg_heal": ("AVG Healing", "avg_healing", lambda v, s: f"{int(v):,}"),
+            "avg_self_heal": ("AVG Self Healing", "avg_self_healing", lambda v, s: f"{int(v):,}"),
+            "avg_shield": ("AVG Shielding", "avg_shielding", lambda v, s: f"{int(v):,}"),
+            "avg_creds": ("AVG Credits", "avg_credits", lambda v, s: f"{int(v):,}"),
+            "obj_time": ("AVG Objective Time", "obj_time", lambda v, s: f"{int(v):,}s"),
+            # Convenience aliases
+            "dmg": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
+            "dpm": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
+            "wr": ("Winrate", "winrate", lambda v, s: f"{v:.2f}% ({s['wins']}-{s['losses']})"),
+            "hpm": ("Healing/Min", "healing_pm", lambda v, s: f"{int(v):,}"),
+        }
+        
+        # --- 1. Argument Parsing ---
+        stat_alias = "winrate"
+        limit = 20
+        show_bottom = False
+        role_filter = None
+        min_games = None
+        
+        valid_roles = {role.lower() for role in CHAMPION_ROLES.values()}
+        role_aliases = {'dmg': 'damage'}
+        
+        unprocessed_args = []
+        args = list(args)
+
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            
+            if arg.lower() == '-m':
+                if i + 1 < len(args) and args[i+1].isdigit():
+                    min_games = max(1, int(args[i+1]))
+                    i += 2
+                    continue
+                i += 1
+                continue
+
+            if arg.lower() == "-b":
+                show_bottom = True
+            elif arg.lower() in stat_map:
+                stat_alias = arg.lower()
+            elif arg.isdigit():
+                limit = int(arg)
+            else:
+                unprocessed_args.append(arg)
+            i += 1
+        
+        # Check for role filter in unprocessed args
+        if unprocessed_args:
+            full_filter_str = " ".join(unprocessed_args).lower()
+            
+            matched_role = None
+            if full_filter_str in role_aliases:
+                matched_role = role_aliases[full_filter_str]
+            else:
+                matched_role = next((role for role in valid_roles if role.startswith(full_filter_str)), None)
+
+            if matched_role:
+                role_filter = matched_role.capitalize()
+
+        limit = max(1, min(limit, 50))
+        
+        if min_games is None:
+            min_games = 1
+        
+        # --- 2. Fetch Data ---
+        display_name, data_key, formatter = stat_map[stat_alias]
+        leaderboard_data = get_champion_leaderboard(
+            data_key, limit, show_bottom,
+            role=role_filter, min_games=min_games
+        )
+        
+        if not leaderboard_data:
+            filter_msg = f" in the '{role_filter}' role" if role_filter else ""
+            await ctx.send(f"Could not generate a champion leaderboard for `{display_name}`{filter_msg}. No qualified champion data found.")
+            return
+
+        # --- 3. Build Embed ---
+        filter_text = f" ({role_filter})" if role_filter else ""
+        
+        embed_title = f"🏆 {'Bottom' if show_bottom else 'Top'} {len(leaderboard_data)} Champions by {display_name}{filter_text}"
+        embed_color = 0xE74C3C if show_bottom else 0x2ECC71
+        embed = discord.Embed(title=embed_title, color=embed_color)
+        
+        if min_games > 1:
+            embed.set_footer(text=f"Champions must have at least {min_games} games played to qualify.")
+
+        description = []
+        for i, data_row in enumerate(leaderboard_data):
+            champ_name = data_row['champ']
+            value = data_row['value']
+            games = data_row['games_played']
+            
+            rank = (data_row['total_champions'] - i) if show_bottom else (i + 1)
+            formatted_value = formatter(value, data_row)
+
+            description.append(f"`{rank:2}.` **{champ_name}** - {formatted_value} *({games} games)*")
+        
+        embed.description = "\n".join(description)
         await ctx.send(embed=embed)
 
 
