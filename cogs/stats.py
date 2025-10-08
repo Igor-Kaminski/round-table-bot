@@ -295,6 +295,8 @@ Shows player rankings, with optional filters for champions or roles.
 **Available Stats:**
 - `winrate` (or `wr`): Overall Winrate
 - `kda`: Kill/Death/Assist Ratio
+- `kp`: Kill Participation (% of team kills + assists)
+- `dmg_share`: Damage Share (% of team damage)
 - `kpm`: Kills per Minute
 - `deaths_pm`: Deaths per Minute
 - `dmg` (or `dpm`): Damage per Minute
@@ -316,6 +318,8 @@ Shows player rankings, with optional filters for champions or roles.
 **Examples:**
 - `!lb heal_pm`: Top 20 healers on Support champions.
 - `!lb heal_pm tank`: Top 20 healers on Tank champions.
+- `!lb kp tank`: Top 20 tanks by kill participation.
+- `!lb dmg_share dmg`: Top 20 damage dealers by damage share.
 """
 
     @commands.command(name="leaderboard", aliases=["lb"], help=LEADERBOARD_HELP)
@@ -324,6 +328,8 @@ Shows player rankings, with optional filters for champions or roles.
         stat_map = {
             "winrate": ("Winrate", "winrate", lambda v, s: f"{v:.2f}% ({s['wins']}-{s['losses']})"),
             "kda": ("KDA Ratio", "kda", lambda v, s: f"{v:.2f} ({s['k']}/{s['d']}/{s['a']})"),
+            "kp": ("Kill Participation", "kp", lambda v, s: f"{v:.2f}%"),
+            "dmg_share": ("Damage Share", "dmg_share", lambda v, s: f"{v:.2f}%"),
             "kpm": ("Kills/Min", "kills_pm", lambda v, s: f"{v:.2f}"),
             "deaths_pm": ("Deaths/Min", "deaths_pm", lambda v, s: f"{v:.2f}"),
             "dmg_pm": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
