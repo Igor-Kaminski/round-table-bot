@@ -64,7 +64,8 @@ The bot will automatically:
 - `!stats [@user] [champion/role]` - View player statistics
 - `!top [@user]` - Interactive champion breakdown
 - `!history [@user] [limit]` - View recent match history
-- `!leaderboard [stat] [filters]` - View server rankings
+- `!leaderboard [stat] [filters]` - View server player rankings
+- `!champ_lb [stat] [role] [filters]` - View champion rankings (all players combined)
 - `!compare @user1 [@user2]` - Compare two players
 
 ### For Admins

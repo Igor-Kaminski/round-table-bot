@@ -12,6 +12,7 @@ from db import (
     get_player_stats,
     get_champion_name,
     get_all_champion_stats,
+    get_player_champion_stats,
     get_match_history,
     get_leaderboard,
     get_champion_leaderboard,
@@ -197,37 +198,355 @@ class Stats(commands.Cog):
 
         await ctx.send(embed=embed, file=icon_file)
 
-    @commands.command(name="top", help="Shows an interactive breakdown of a player's champions.")
-    async def top_cmd(self, ctx, user: PlayerConverter = None):
-        target_user = user or ctx.author
-        player_id = get_player_id(str(target_user.id))
+    TOP_HELP = """
+Shows champion statistics breakdown for a player.
 
+**Usage:** `!top [@user] [-stat1] [-stat2] ... [role/champion] [-m <games>]`
+
+**Arguments:**
+- `[@user]`: Target player (defaults to yourself)
+- `[-stat]`: Stats to display (e.g., `-kpm -dmg_share -kda`)
+- `[role/champion]`: Filter by role or champion name
+- `[-m <games>]`: Minimum games filter (default: 1)
+
+**Available Stats:**
+- `-wr` or `-winrate`: Winrate percentage
+- `-kda`: KDA ratio
+- `-kpm`: Kills per minute
+- `-dpm` or `-deaths_pm`: Deaths per minute  
+- `-dmg` or `-damage_pm`: Damage per minute
+- `-taken_pm`: Damage taken per minute
+- `-heal_pm`: Healing per minute
+- `-self_heal_pm`: Self healing per minute
+- `-creds_pm`: Credits per minute
+- `-kp`: Kill participation %
+- `-dmg_share`: Damage share %
+- `-avg_kills`: Average kills per match
+- `-avg_deaths`: Average deaths per match
+- `-avg_dmg`: Average damage per match
+- `-avg_taken`: Average damage taken per match
+- `-delta`: Average damage delta
+- `-avg_heal`: Average healing per match
+- `-avg_self_heal`: Average self healing per match
+- `-avg_shield`: Average shielding per match
+- `-avg_creds`: Average credits per match
+- `-obj_time`: Average objective time
+
+**Examples:**
+- `!top` - Shows default stats (games, winrate, KDA, time)
+- `!top -kpm -dmg_share` - Shows kills/min and damage share
+- `!top tank -m 5` - Shows tanks with 5+ games
+- `!top @user -wr -kp -dmg support` - Shows support stats with custom columns
+"""
+
+    @commands.command(name="top", help=TOP_HELP)
+    async def top_cmd(self, ctx, *args):
+        # Parse arguments
+        target_user = ctx.author
+        stat_flags = []
+        role_filter = None
+        champion_filter = None
+        min_games = 1
+        unprocessed_args = []
+        
+        # Define stat aliases
+        stat_aliases = {
+            '-wr': '-winrate',
+            '-dmg': '-damage_pm', 
+            '-dpm': '-deaths_pm',
+            '-avg_dmg': '-avg_damage_dealt',
+            '-avg_taken': '-avg_damage_taken',
+            '-avg_heal': '-avg_healing',
+            '-avg_self_heal': '-avg_self_healing',
+            '-avg_shield': '-avg_shielding',
+            '-avg_creds': '-avg_credits',
+            '-delta': '-damage_delta',
+            '-kpm': '-kills_pm',
+            '-heal_pm': '-healing_pm',
+            '-self_heal_pm': '-self_healing_pm',
+            '-creds_pm': '-credits_pm'
+        }
+        
+        # Valid stat keys
+        valid_stats = {
+            '-winrate', '-kda', '-kda_ratio', '-kills_pm', '-deaths_pm', 
+            '-damage_pm', '-damage_dealt_pm', '-damage_taken_pm', '-healing_pm', 
+            '-self_healing_pm', '-credits_pm', '-kp', '-dmg_share',
+            '-avg_kills', '-avg_deaths', '-avg_damage_dealt', '-avg_damage_taken',
+            '-damage_delta', '-avg_healing', '-avg_self_healing', '-avg_shielding',
+            '-avg_credits', '-obj_time'
+        }
+        
+        # Process arguments
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            
+            # Check for -m flag
+            if arg.lower() == '-m':
+                if i + 1 < len(args) and args[i+1].isdigit():
+                    min_games = max(1, int(args[i+1]))
+                    i += 2
+                    continue
+                i += 1
+                continue
+            
+            # Check for stat flags
+            if arg.lower().startswith('-'):
+                normalized = stat_aliases.get(arg.lower(), arg.lower())
+                if normalized in valid_stats:
+                    # Remove the dash and store the actual key
+                    stat_key = normalized[1:].replace('_pm', '_pm').replace('damage_pm', 'damage_dealt_pm')
+                    if stat_key not in stat_flags:
+                        stat_flags.append(stat_key)
+                else:
+                    await ctx.send(f"Unknown stat flag: `{arg}`. Use `!help top` to see available stats.")
+                    return
+            else:
+                unprocessed_args.append(arg)
+            i += 1
+        
+        # Process non-flag arguments
+        if unprocessed_args:
+            # Check if first arg is a user
+            try:
+                target_user = await PlayerConverter().convert(ctx, unprocessed_args[0])
+                unprocessed_args = unprocessed_args[1:]
+            except:
+                pass  # Not a user, continue processing
+            
+            # Check for role/champion filter
+            if unprocessed_args:
+                filter_str = " ".join(unprocessed_args).lower()
+                
+                # Check if it's a role
+                valid_roles = {role.lower() for role in CHAMPION_ROLES.values()}
+                role_aliases_map = {'dmg': 'damage'}
+                
+                matched_role = None
+                if filter_str in role_aliases_map:
+                    matched_role = role_aliases_map[filter_str]
+                else:
+                    matched_role = next((role for role in valid_roles if role.startswith(filter_str)), None)
+                
+                if matched_role:
+                    role_filter = matched_role.capitalize()
+                else:
+                    champion_filter = filter_str
+        
+        # Get player ID
+        player_id = get_player_id(str(target_user.id))
         if not player_id:
             await ctx.send(f"No stats found for {target_user.display_name}. They may need to `!link` their IGN.")
             return
-            
-        all_champ_data = get_all_champion_stats(player_id)
-        if not all_champ_data:
-            await ctx.send(f"No champion stats found for {target_user.display_name}.")
-            return
-
-        # Create and send the initial view
-        view = TopChampsView(ctx.author.id, all_champ_data, target_user.display_name)
-        initial_description = view._generate_description()
         
+        # Default stats if none specified
+        if not stat_flags:
+            stat_flags = ['winrate', 'kda_ratio', 'games', 'time_played']
+        
+        # Get champion stats
+        champ_data = get_player_champion_stats(player_id, role_filter=role_filter, min_games=min_games)
+        
+        # Filter by champion if specified
+        if champion_filter and champ_data:
+            # Find champions that match the filter
+            filtered_data = []
+            for champ in champ_data:
+                if champion_filter in champ['champ'].lower():
+                    filtered_data.append(champ)
+            
+            if not filtered_data:
+                await ctx.send(f"No stats found for champion matching '{champion_filter}'.")
+                return
+            champ_data = filtered_data
+        
+        if not champ_data:
+            filter_msg = ""
+            if role_filter:
+                filter_msg = f" for role '{role_filter}'"
+            elif champion_filter:
+                filter_msg = f" for champion '{champion_filter}'"
+            if min_games > 1:
+                filter_msg += f" with at least {min_games} games"
+            await ctx.send(f"No champion stats found for {target_user.display_name}{filter_msg}.")
+            return
+        
+        # Sort by first stat flag (or games if using defaults)
+        sort_key = stat_flags[0] if stat_flags[0] not in ['time_played'] else 'games'
+        champ_data.sort(key=lambda x: x.get(sort_key, 0), reverse=True)
+        
+        # Build the display
         embed = discord.Embed(
-            title=f"Top Champions for {target_user.display_name}",
-            description=initial_description,
+            title=f"Champion Stats for {target_user.display_name}",
             color=discord.Color.blue()
         )
         
-        # Send the message and store it on the view for later editing
-        view.message = await ctx.send(
-            "This message will self-destruct in 90 seconds.\nSelect an option:",
-            embed=embed,
-            view=view,
-            delete_after=90
-        )
+        # Add filters to description if any
+        filters = []
+        if role_filter:
+            filters.append(f"Role: {role_filter}")
+        if champion_filter:
+            filters.append(f"Champion: {champion_filter}")
+        if min_games > 1:
+            filters.append(f"Min games: {min_games}")
+        if filters:
+            embed.description = f"*Filters: {', '.join(filters)}*"
+        
+        # Define stat formatters
+        stat_formatters = {
+            'winrate': lambda v: f"{v:.1f}%",
+            'kda_ratio': lambda v: f"{v:.2f}",
+            'kda': lambda v: v,
+            'kills_pm': lambda v: f"{v:.2f}",
+            'deaths_pm': lambda v: f"{v:.2f}",
+            'damage_dealt_pm': lambda v: f"{int(v):,}",
+            'damage_taken_pm': lambda v: f"{int(v):,}",
+            'healing_pm': lambda v: f"{int(v):,}",
+            'self_healing_pm': lambda v: f"{int(v):,}",
+            'credits_pm': lambda v: f"{int(v):,}",
+            'kp': lambda v: f"{v:.1f}%",
+            'dmg_share': lambda v: f"{v:.1f}%",
+            'avg_kills': lambda v: f"{v:.1f}",
+            'avg_deaths': lambda v: f"{v:.1f}",
+            'avg_damage_dealt': lambda v: f"{int(v):,}",
+            'avg_damage_taken': lambda v: f"{int(v):,}",
+            'damage_delta': lambda v: f"{int(v):,}",
+            'avg_healing': lambda v: f"{int(v):,}",
+            'avg_self_healing': lambda v: f"{int(v):,}",
+            'avg_shielding': lambda v: f"{int(v):,}",
+            'avg_credits': lambda v: f"{int(v):,}",
+            'obj_time': lambda v: f"{int(v)}s",
+            'games': lambda v: str(v),
+            'time_played': lambda v: v
+        }
+        
+        # Define display names for stats
+        stat_display_names = {
+            'winrate': 'WR%',
+            'kda_ratio': 'KDA',
+            'kda': 'K/D/A',
+            'kills_pm': 'K/min',
+            'deaths_pm': 'D/min',
+            'damage_dealt_pm': 'DMG/min',
+            'damage_taken_pm': 'Taken/min',
+            'healing_pm': 'Heal/min',
+            'self_healing_pm': 'SHeal/min',
+            'credits_pm': 'Creds/min',
+            'kp': 'KP%',
+            'dmg_share': 'DMG%',
+            'avg_kills': 'AvgK',
+            'avg_deaths': 'AvgD',
+            'avg_damage_dealt': 'AvgDMG',
+            'avg_damage_taken': 'AvgTaken',
+            'damage_delta': 'Delta',
+            'avg_healing': 'AvgHeal',
+            'avg_self_healing': 'AvgSHeal',
+            'avg_shielding': 'AvgShield',
+            'avg_credits': 'AvgCreds',
+            'obj_time': 'ObjTime',
+            'games': 'Games',
+            'time_played': 'Time'
+        }
+        
+        # Build the table
+        lines = []
+        
+        # Determine column widths
+        col_widths = {'champ': 16}
+        for stat in stat_flags:
+            display_name = stat_display_names.get(stat, stat)
+            col_widths[stat] = max(len(display_name) + 2, 10)
+        
+        # Build header
+        header_parts = [f"{'Champion':<16}"]
+        for stat in stat_flags:
+            display_name = stat_display_names.get(stat, stat)
+            header_parts.append(f"{display_name:<{col_widths[stat]}}")
+        header = "".join(header_parts)
+        separator = "-" * len(header)
+        
+        # Add data rows grouped by role
+        if not role_filter and not champion_filter:
+            # Group by role
+            for role in ["Damage", "Flank", "Tank", "Support"]:
+                role_champs = [c for c in champ_data if CHAMPION_ROLES.get(c["champ"]) == role]
+                if role_champs:
+                    lines.append(header)
+                    lines.append(separator)
+                    lines.append(f"# {role}")
+                    
+                    for i, champ in enumerate(role_champs[:10], 1):  # Limit to top 10 per role
+                        row_parts = [f"{i}. {champ['champ'][:14]:<14}"]
+                        for stat in stat_flags:
+                            value = champ.get(stat, 0)
+                            formatter = stat_formatters.get(stat, str)
+                            formatted = formatter(value)
+                            row_parts.append(f"{formatted:<{col_widths[stat]}}")
+                        lines.append("".join(row_parts))
+                    lines.append("")
+        else:
+            # No role grouping
+            lines.append(header)
+            lines.append(separator)
+            
+            for i, champ in enumerate(champ_data[:30], 1):  # Limit to top 30
+                row_parts = [f"{i}. {champ['champ'][:14]:<14}"]
+                for stat in stat_flags:
+                    value = champ.get(stat, 0)
+                    formatter = stat_formatters.get(stat, str)
+                    formatted = formatter(value)
+                    row_parts.append(f"{formatted:<{col_widths[stat]}}")
+                lines.append("".join(row_parts))
+        
+        # Add to embed
+        result_text = "```\n" + "\n".join(lines) + "\n```"
+        
+        # Check if the result is too long
+        if len(result_text) > 1900:
+            # Truncate and add note
+            truncated_lines = []
+            current_length = 0
+            for line in lines:
+                if current_length + len(line) + 10 > 1900:  # Leave room for closing
+                    truncated_lines.append("... (truncated)")
+                    break
+                truncated_lines.append(line)
+                current_length += len(line) + 1
+            result_text = "```\n" + "\n".join(truncated_lines) + "\n```"
+        
+        # Split into multiple fields if needed
+        if len(result_text) <= 1024:
+            embed.add_field(name="Statistics", value=result_text, inline=False)
+        else:
+            # Split the content
+            chunks = []
+            current_chunk = []
+            current_length = 0
+            
+            for line in lines:
+                if current_length + len(line) + 10 > 1000:
+                    chunks.append("```\n" + "\n".join(current_chunk) + "\n```")
+                    current_chunk = [line]
+                    current_length = len(line)
+                else:
+                    current_chunk.append(line)
+                    current_length += len(line) + 1
+            
+            if current_chunk:
+                chunks.append("```\n" + "\n".join(current_chunk) + "\n```")
+            
+            for i, chunk in enumerate(chunks[:3]):  # Max 3 fields
+                field_name = "Statistics" if i == 0 else "​"  # Zero-width space for continuation
+                embed.add_field(name=field_name, value=chunk, inline=False)
+        
+        # Add footer with info
+        footer_parts = []
+        if stat_flags != ['winrate', 'kda_ratio', 'games', 'time_played']:
+            footer_parts.append(f"Stats shown: {', '.join(stat_display_names.get(s, s) for s in stat_flags)}")
+        footer_parts.append(f"Use !help top for more options")
+        embed.set_footer(text=" • ".join(footer_parts))
+        
+        await ctx.send(embed=embed)
 
     @commands.command(name="history", help="Shows recent matches. Ex: !history 10, !history @user 5 | Max 20")
     async def history_cmd(self, ctx, *args):

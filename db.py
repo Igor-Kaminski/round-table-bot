@@ -906,6 +906,129 @@ def get_all_champion_stats(player_id):
     return champs
 
 
+def get_player_champion_stats(player_id, role_filter=None, min_games=1):
+    """
+    Gets comprehensive stats for all champions played by a player.
+    Returns a list of champion stats with all available metrics.
+    """
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    
+    try:
+        # Build where conditions for player filter
+        where_conditions = ["ps.player_id = ?"]
+        params = [player_id]
+        
+        # Apply role filter if specified
+        if role_filter:
+            champions_in_role = [c for c, r in CHAMPION_ROLES.items() if r == role_filter]
+            if not champions_in_role:
+                return []
+            placeholders = ', '.join('?' for _ in champions_in_role)
+            where_conditions.append(f"ps.champ IN ({placeholders})")
+            params.extend(champions_in_role)
+        
+        where_clause = " AND ".join(where_conditions)
+        
+        query = f"""
+            WITH TeamTotals AS (
+                SELECT match_id, team, SUM(kills) as team_kills, SUM(damage) as team_damage
+                FROM player_stats GROUP BY match_id, team
+            ),
+            PlayerMatchShares AS (
+                SELECT 
+                    ps.*,
+                    CASE WHEN tt.team_kills > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kills ELSE 0 END as kill_share,
+                    CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END as damage_share
+                FROM player_stats ps
+                JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
+                WHERE {where_clause}
+            )
+            SELECT
+                pms.champ,
+                COUNT(pms.match_id) AS games,
+                SUM(CASE WHEN (pms.team = 1 AND m.team1_score > m.team2_score) OR (pms.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) as wins,
+                SUM(pms.kills) as total_kills,
+                SUM(pms.deaths) as total_deaths,
+                SUM(pms.assists) as total_assists,
+                SUM(pms.damage) as total_damage,
+                SUM(pms.taken) as total_taken,
+                SUM(pms.objective_time) as total_obj_time,
+                SUM(pms.shielding) as total_shielding,
+                SUM(pms.healing) as total_healing,
+                SUM(pms.self_healing) as total_self_healing,
+                SUM(pms.credits) as total_credits,
+                SUM(m.time) as total_minutes,
+                
+                -- Averages
+                AVG(pms.kills) as avg_kills,
+                AVG(pms.deaths) as avg_deaths,
+                AVG(pms.damage) as avg_damage,
+                AVG(pms.taken) as avg_taken,
+                AVG(pms.objective_time) as avg_obj_time,
+                AVG(pms.shielding) as avg_shielding,
+                AVG(pms.healing) as avg_healing,
+                AVG(pms.self_healing) as avg_self_healing,
+                AVG(pms.credits) as avg_credits,
+                AVG(pms.kill_share) as avg_kill_share,
+                AVG(pms.damage_share) as avg_damage_share
+                
+            FROM PlayerMatchShares pms
+            JOIN matches m ON pms.match_id = m.match_id
+            WHERE m.time > 0
+            GROUP BY pms.champ
+            HAVING games >= ?
+        """
+        
+        params.append(min_games)
+        cursor.execute(query, params)
+        rows = cursor.fetchall()
+        
+        champs = []
+        for row in rows:
+            champ_data = dict(row)
+            games = champ_data['games']
+            wins = champ_data['wins']
+            total_minutes = champ_data['total_minutes'] or 1
+            
+            # Calculate all possible stats
+            champ_stats = {
+                "champ": champ_data['champ'],
+                "games": games,
+                "wins": wins,
+                "losses": games - wins,
+                "winrate": round(100 * wins / games, 2) if games else 0,
+                "kda": f"{champ_data['total_kills']}/{champ_data['total_deaths']}/{champ_data['total_assists']}",
+                "kda_ratio": round((champ_data['total_kills'] + champ_data['total_assists']) / max(1, champ_data['total_deaths']), 2),
+                "kills_pm": round(champ_data['total_kills'] / total_minutes, 2),
+                "deaths_pm": round(champ_data['total_deaths'] / total_minutes, 2),
+                "damage_dealt_pm": round(champ_data['total_damage'] / total_minutes, 2),
+                "damage_taken_pm": round(champ_data['total_taken'] / total_minutes, 2),
+                "healing_pm": round(champ_data['total_healing'] / total_minutes, 2),
+                "self_healing_pm": round(champ_data['total_self_healing'] / total_minutes, 2),
+                "credits_pm": round(champ_data['total_credits'] / total_minutes, 2),
+                "avg_kills": round(champ_data['avg_kills'], 2),
+                "avg_deaths": round(champ_data['avg_deaths'], 2),
+                "avg_damage_dealt": round(champ_data['avg_damage']),
+                "avg_damage_taken": round(champ_data['avg_taken']),
+                "damage_delta": round(champ_data['avg_damage'] - champ_data['avg_taken']),
+                "avg_healing": round(champ_data['avg_healing']),
+                "avg_self_healing": round(champ_data['avg_self_healing']),
+                "avg_shielding": round(champ_data['avg_shielding']),
+                "avg_credits": round(champ_data['avg_credits']),
+                "obj_time": round(champ_data['avg_obj_time'], 2),
+                "kp": round(champ_data['avg_kill_share'], 2),
+                "dmg_share": round(champ_data['avg_damage_share'], 2),
+                "time_played": f"{int(total_minutes // 60)}h {int(total_minutes % 60)}m"
+            }
+            champs.append(champ_stats)
+            
+        return champs
+    finally:
+        conn.close()
+
+
 def delete_match(match_id):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
