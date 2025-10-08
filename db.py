@@ -99,7 +99,6 @@ def insert_scoreboard(scoreboard, queue_num):
             (match_id, time, region, map_name, team1_score, team2_score, queue_num),
         )
 
-        # The loop no longer needs to calculate the team number
         for player in players:
             ign = player["name"]
             champ = player["champ"]
@@ -114,7 +113,7 @@ def insert_scoreboard(scoreboard, queue_num):
             shielding = player["shielding"]
             healing = player["healing"]
             self_healing = player["self_healing"]
-            team = player["team"]  # Use the team number from the parser
+            team = player["team"]
 
             cursor.execute(
                 "SELECT player_id, discord_id, alt_igns FROM players WHERE player_ign = ?;",
@@ -435,125 +434,117 @@ def get_player_id(discord_id):
     conn.close()
     return result[0] if result else None
 
+
 def get_player_stats(player_id, champions=None):
     """
-    Fetches aggregated player stats.
+    Fetches aggregated player stats, now including Kill Participation and Damage Share.
     If no champion/role filter is provided, 'healing' stats are calculated
     from games played on Support champions only, while 'self_healing' uses all games.
     """
     conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row 
     cursor = conn.cursor()
     
     try:
-        # --- Case 1: A specific filter (champion or role) IS provided ---
+        query = """
+            WITH TeamTotals AS (
+                SELECT
+                    match_id,
+                    team,
+                    SUM(kills) AS team_kills,
+                    SUM(damage) AS team_damage
+                FROM player_stats
+                GROUP BY match_id, team
+            )
+            SELECT
+                COUNT(ps.match_id) AS games_played,
+                SUM(ps.kills) AS total_kills,
+                SUM(ps.deaths) AS total_deaths,
+                SUM(ps.assists) AS total_assists,
+                SUM(ps.damage) AS total_damage,
+                SUM(ps.taken) AS total_taken,
+                SUM(ps.objective_time) AS total_obj_time,
+                SUM(ps.shielding) AS total_shielding,
+                SUM(ps.healing) AS total_healing,
+                SUM(ps.self_healing) AS total_self_healing,
+                SUM(ps.credits) AS total_credits,
+                SUM(m.time) AS total_time_in_minutes,
+                SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) AS total_wins,
+                
+                -- MODIFIED: Kill Participation now includes assists
+                AVG(CASE WHEN tt.team_kills > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kills ELSE 0 END) AS avg_kill_share,
+                AVG(CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END) AS avg_damage_share
+
+            FROM player_stats ps
+            JOIN matches m ON ps.match_id = m.match_id
+            JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
+            WHERE ps.player_id = ?
+        """
+        
+        params = [player_id]
+        
         if champions and isinstance(champions, list):
             placeholders = ', '.join('?' for _ in champions)
-            query = f"""
-                SELECT
-                    ps.kills, ps.deaths, ps.assists, ps.damage, ps.objective_time,
-                    ps.shielding, ps.healing, ps.self_healing, m.time,
-                    CASE
-                        WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1
-                        ELSE 0
-                    END AS win,
-                    ps.credits, ps.taken
-                FROM player_stats ps
-                JOIN matches m ON ps.match_id = m.match_id
-                WHERE ps.player_id = ? AND ps.champ IN ({placeholders})
-            """
-            params = [player_id] + champions
-            cursor.execute(query, params)
-            rows = cursor.fetchall()
-            if not rows:
-                return None
-            
-            (total_kills, total_deaths, total_assists, total_damage, total_obj_time, 
-             total_shielding, total_healing, total_self_healing, total_time_in_minutes, 
-             total_wins, total_credits, total_taken) = [sum(col) for col in zip(*rows)]
+            query += f" AND ps.champ IN ({placeholders})"
+            params.extend(champions)
 
-        # --- Case 2: NO filter is provided (default view) ---
-        else:
-            # Step A: Get all non-healing stats from all games
-            query_all = """
-                SELECT
-                    ps.kills, ps.deaths, ps.assists, ps.damage, ps.objective_time,
-                    ps.shielding, ps.self_healing, m.time,
-                    CASE
-                        WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1
-                        ELSE 0
-                    END AS win,
-                    ps.credits, ps.taken
-                FROM player_stats ps
-                JOIN matches m ON ps.match_id = m.match_id
-                WHERE ps.player_id = ?
-            """
-            cursor.execute(query_all, (player_id,))
-            rows = cursor.fetchall()
-            if not rows:
-                return None
-            
-            (total_kills, total_deaths, total_assists, total_damage, total_obj_time,
-             total_shielding, total_self_healing, total_time_in_minutes, total_wins,
-             total_credits, total_taken) = [sum(col) for col in zip(*rows)]
+        cursor.execute(query, params)
+        data = cursor.fetchone()
 
-            # Step B: Get 'healing' stats from Support games ONLY
-            support_champs = [champ for champ, role in CHAMPION_ROLES.items() if role == "Support"]
-            placeholders = ', '.join('?' for _ in support_champs)
-            query_healing = f"""
-                SELECT SUM(ps.healing), SUM(m.time)
-                FROM player_stats ps
-                JOIN matches m ON ps.match_id = m.match_id
-                WHERE ps.player_id = ? AND ps.champ IN ({placeholders})
-            """
-            cursor.execute(query_healing, [player_id] + support_champs)
-            healing_row = cursor.fetchone()
-            
-            total_healing = healing_row[0] or 0
-            support_time_in_minutes = healing_row[1] or 0
-        
-        # --- Common calculations for both cases ---
-        games_played = len(rows)
-        total_losses = games_played - total_wins
+        if not data or data["games_played"] == 0:
+            return None
 
-        # Final dictionary assembly
+        games_played = data["games_played"]
+        total_wins = data["total_wins"]
+        total_time_in_minutes = data["total_time_in_minutes"]
+
         stats_dict = {
             "games": games_played,
             "wins": total_wins,
-            "losses": total_losses,
-            "raw_k": total_kills,
-            "raw_d": total_deaths,
-            "raw_a": total_assists,
+            "losses": games_played - total_wins,
+            "raw_k": data["total_kills"], "raw_d": data["total_deaths"], "raw_a": data["total_assists"],
             "winrate": round((total_wins / games_played) * 100, 2) if games_played > 0 else 0,
-            "kda": f"{total_kills}/{total_deaths}/{total_assists}",
-            "kda_ratio": round((total_kills + total_assists) / max(1, total_deaths), 2),
-            "kills_pm": round(total_kills / max(1, total_time_in_minutes), 2),
-            "deaths_pm": round(total_deaths / max(1, total_time_in_minutes), 2),
-            "damage_dealt_pm": round(total_damage / max(1, total_time_in_minutes), 2),
-            "self_healing_pm": round(total_self_healing / max(1, total_time_in_minutes), 2),
-            "credits_pm": round(total_credits / max(1, total_time_in_minutes), 2),
-            "obj_time": round(total_obj_time / games_played, 2) if games_played > 0 else 0,
-            "avg_kills": round(total_kills / games_played, 2) if games_played > 0 else 0,
-            "avg_deaths": round(total_deaths / games_played, 2) if games_played > 0 else 0,
-            "avg_damage_dealt": round(total_damage / games_played) if games_played > 0 else 0,
-            "avg_damage_taken": round(total_taken / games_played) if games_played > 0 else 0,
-            "avg_self_healing": round(total_self_healing / games_played) if games_played > 0 else 0,
-            "avg_shielding": round(total_shielding / games_played) if games_played > 0 else 0,
-            "avg_credits": round(total_credits / games_played) if games_played > 0 else 0,
-            "damage_taken_pm": round(total_taken / max(1, total_time_in_minutes), 2),
-            "damage_delta": round((total_damage - total_taken) / games_played) if games_played > 0 else 0,
+            "kda": f"{data['total_kills']}/{data['total_deaths']}/{data['total_assists']}",
+            "kda_ratio": round((data['total_kills'] + data['total_assists']) / max(1, data['total_deaths']), 2),
+            "kills_pm": round(data["total_kills"] / max(1, total_time_in_minutes), 2),
+            "deaths_pm": round(data["total_deaths"] / max(1, total_time_in_minutes), 2),
+            "damage_dealt_pm": round(data["total_damage"] / max(1, total_time_in_minutes), 2),
+            "damage_taken_pm": round(data["total_taken"] / max(1, total_time_in_minutes), 2),
+            "self_healing_pm": round(data["total_self_healing"] / max(1, total_time_in_minutes), 2),
+            "credits_pm": round(data["total_credits"] / max(1, total_time_in_minutes), 2),
+            "obj_time": round(data["total_obj_time"] / games_played, 2) if games_played > 0 else 0,
+            "avg_kills": round(data["total_kills"] / games_played, 2) if games_played > 0 else 0,
+            "avg_deaths": round(data["total_deaths"] / games_played, 2) if games_played > 0 else 0,
+            "avg_damage_dealt": round(data["total_damage"] / games_played) if games_played > 0 else 0,
+            "avg_damage_taken": round(data["total_taken"] / games_played) if games_played > 0 else 0,
+            "avg_self_healing": round(data["total_self_healing"] / games_played) if games_played > 0 else 0,
+            "avg_shielding": round(data["total_shielding"] / games_played) if games_played > 0 else 0,
+            "avg_credits": round(data["total_credits"] / games_played) if games_played > 0 else 0,
+            "damage_delta": round((data["total_damage"] - data["total_taken"]) / games_played) if games_played > 0 else 0,
+            "kill_share": data["avg_kill_share"] or 0,
+            "damage_share": data["avg_damage_share"] or 0,
         }
-        
-        # Add 'healing' stats based on context
-        if champions: # Filtered case - use its own time and games
-            stats_dict["healing_pm"] = round(total_healing / max(1, total_time_in_minutes), 2)
-            stats_dict["avg_healing"] = round(total_healing / games_played) if games_played > 0 else 0
-        else: # Default case - use special support-only time and games
-            # To get avg_healing for supports, we need to count support games
-            cursor.execute(f"SELECT COUNT(*) FROM player_stats WHERE player_id = ? AND champ IN ({placeholders})", [player_id] + support_champs)
-            support_games_played = cursor.fetchone()[0] or 0
-            stats_dict["healing_pm"] = round(total_healing / max(1, support_time_in_minutes), 2)
-            stats_dict["avg_healing"] = round(total_healing / max(1, support_games_played))
+
+        total_healing = data["total_healing"]
+        support_time = total_time_in_minutes
+        support_games = games_played
+
+        if not champions:
+            support_champs = [champ for champ, role in CHAMPION_ROLES.items() if role == "Support"]
+            placeholders = ', '.join('?' for _ in support_champs)
+            cursor.execute(f"""
+                SELECT SUM(ps.healing), SUM(m.time), COUNT(ps.match_id)
+                FROM player_stats ps JOIN matches m ON ps.match_id = m.match_id
+                WHERE ps.player_id = ? AND ps.champ IN ({placeholders})
+            """, [player_id] + support_champs)
+            healing_row = cursor.fetchone()
+            total_healing = healing_row[0] or 0
+            support_time = healing_row[1] or 0
+            support_games = healing_row[2] or 0
             
+        stats_dict["healing_pm"] = round(total_healing / max(1, support_time), 2)
+        stats_dict["avg_healing"] = round(total_healing / max(1, support_games))
+
         return stats_dict
     finally:
         conn.close()
@@ -657,11 +648,9 @@ def compare_players(discord_id1, discord_id2):
     }
 
 def get_match_history(player_id, limit: int = 30):
-    """Fetches a variable number of recent matches for a player."""
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
-        # UPDATED: The LIMIT is now a parameter
         cursor.execute("""
             SELECT
                 m.map, ps.champ, ps.kills, ps.deaths, ps.assists,
@@ -680,25 +669,19 @@ def get_match_history(player_id, limit: int = 30):
     finally:
         conn.close()
 
-# For this function to work, the CHAMPION_ROLES dictionary must be accessible.
-# It's best to define it once at the top of your db.py file.
 CHAMPION_ROLES = {
-    # Damage
     "Bomb King": "Damage", "Cassie": "Damage", "Dredge": "Damage", "Drogoz": "Damage",
     "Imani": "Damage", "Kinessa": "Damage", "Lian": "Damage", "Octavia": "Damage",
     "Saati": "Damage", "Sha Lin": "Damage", "Strix": "Damage", "Tiberius": "Damage",
     "Tyra": "Damage", "Viktor": "Damage", "Willo": "Damage", "Betty la Bomba": "Damage",
     "Omen": "Damage",
-    # Flank
     "Androxus": "Flank", "Buck": "Flank", "Caspian": "Flank", "Evie": "Flank",
     "Koga": "Flank", "Lex": "Flank", "Maeve": "Flank", "Moji": "Flank",
     "Skye": "Flank", "Talus": "Flank", "Vatu": "Flank", "Vora": "Flank",
     "VII": "Flank", "Zhin": "Flank",
-    # Tank
     "Ash": "Tank", "Atlas": "Tank", "Azaan": "Tank", "Barik": "Tank", "Fernando": "Tank",
     "Inara": "Tank", "Khan": "Tank", "Makoa": "Tank", "Raum": "Tank", "Ruckus": "Tank",
     "Terminus": "Tank", "Torvald": "Tank", "Yagorath": "Tank", "Nyx": "Tank",
-    # Support
     "Corvus": "Support", "Furia": "Support", "Ghrok": "Support", "Grover": "Support",
     "Io": "Support", "Jenos": "Support", "Lillith": "Support", "Mal'Damba": "Support",
     "Pip": "Support", "Rei": "Support", "Seris": "Support", "Ying": "Support",
@@ -725,31 +708,27 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
         "avg_shielding": "AVG(ps.shielding)",
         "avg_credits": "AVG(ps.credits)",
         "obj_time": "AVG(ps.objective_time)",
+        "kp": "AVG(ps.kill_share)",
+        "dmg_share": "AVG(ps.damage_share)",
     }
 
     if stat_key not in stat_expressions:
         return None
 
     order = "ASC" if show_bottom else "DESC"
-
     params = []
     where_conditions = ["p.discord_id IS NOT NULL", "m.time > 0"]
-    
-    # Define which stats should default to support-only
     healing_only_stats = ["healing_pm", "avg_healing"]
 
-    # Apply role/champion filters
     if champion:
         where_conditions.append("ps.champ LIKE ?")
         params.append(f"%{champion}%")
     elif role:
         champions_in_role = [c for c, r in CHAMPION_ROLES.items() if r == role]
-        if not champions_in_role:
-            return None
+        if not champions_in_role: return None
         placeholders = ', '.join('?' for _ in champions_in_role)
         where_conditions.append(f"ps.champ IN ({placeholders})")
         params.extend(champions_in_role)
-    # If no filter is given BUT it's a healing stat, default to Support
     elif stat_key in healing_only_stats:
         champions_in_role = [c for c, r in CHAMPION_ROLES.items() if r == "Support"]
         placeholders = ', '.join('?' for _ in champions_in_role)
@@ -757,21 +736,30 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
         params.extend(champions_in_role)
 
     where_clause = " AND ".join(where_conditions)
-    
     final_params = params + [min_games, limit]
 
     query = f"""
-        WITH PlayerAggregates AS (
+        WITH TeamTotals AS (
+            SELECT match_id, team, SUM(kills) as team_kills, SUM(damage) as team_damage
+            FROM player_stats GROUP BY match_id, team
+        ),
+        MatchShares AS (
+            SELECT 
+                ps.*,
+                -- MODIFIED: Kill Participation now includes assists
+                CASE WHEN tt.team_kills > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kills ELSE 0 END as kill_share,
+                CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END as damage_share
+            FROM player_stats ps
+            JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
+        ),
+        PlayerAggregates AS (
             SELECT
-                p.discord_id,
-                p.player_ign,
+                p.discord_id, p.player_ign,
                 COUNT(ps.match_id) AS games_played,
                 SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) as wins,
-                SUM(ps.kills) as total_k,
-                SUM(ps.deaths) as total_d,
-                SUM(ps.assists) as total_a,
+                SUM(ps.kills) as total_k, SUM(ps.deaths) as total_d, SUM(ps.assists) as total_a,
                 ({stat_expressions[stat_key]}) AS value
-            FROM player_stats ps
+            FROM MatchShares ps
             JOIN players p ON ps.player_id = p.player_id
             JOIN matches m ON ps.match_id = m.match_id
             WHERE {where_clause}
@@ -779,14 +767,9 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
             HAVING games_played >= ?
         )
         SELECT
-            pa.discord_id,
-            pa.player_ign,
-            pa.value,
-            pa.wins,
+            pa.discord_id, pa.player_ign, pa.value, pa.wins,
             (pa.games_played - pa.wins) AS losses,
-            pa.total_k as k,
-            pa.total_d as d,
-            pa.total_a as a,
+            pa.total_k as k, pa.total_d as d, pa.total_a as a,
             (SELECT COUNT(*) FROM PlayerAggregates) as total_players
         FROM PlayerAggregates pa
         ORDER BY pa.value {order}, pa.games_played DESC
@@ -864,10 +847,8 @@ def migrate_team_column():
 
 
 def get_discord_id_for_ign(ign):
-    """NEW: Finds a discord_id by looking up a player's main IGN."""
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
-    # Using LIKE for case-insensitivity (default in SQLite)
     cursor.execute(
         "SELECT discord_id FROM players WHERE player_ign LIKE ? AND discord_id IS NOT NULL;",
         (ign,)
@@ -878,7 +859,6 @@ def get_discord_id_for_ign(ign):
 
 
 def get_champion_name(player_id, partial_name):
-    """NEW: Finds the full, correct champion name from a partial name for a specific player."""
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     cursor.execute(
@@ -892,7 +872,6 @@ def get_champion_name(player_id, partial_name):
 
 
 def get_all_champion_stats(player_id):
-    """NEW: Fetches stats for all champions played by a user."""
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     cursor.execute(
@@ -915,13 +894,12 @@ def get_all_champion_stats(player_id):
     for row in rows:
         champ, games, wins, kills, deaths, assists, total_minutes = row
         
-        # FIXED: Added the 'time_played' key back to the dictionary
         champ_stats = {
             "champ": champ,
             "games": games,
             "winrate": round(100 * wins / games, 2) if games else 0,
             "kda_ratio": round((kills + assists) / max(1, deaths), 2),
-            "time_played": f"{total_minutes // 60}h {total_minutes % 60}m" # Format as Hh Mm
+            "time_played": f"{total_minutes // 60}h {total_minutes % 60}m"
         }
         champs.append(champ_stats)
     conn.close()
@@ -929,26 +907,21 @@ def get_all_champion_stats(player_id):
 
 
 def delete_match(match_id):
-    """Deletes a match and all associated player stats from the database."""
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
-        # First, check if the match even exists
         cursor.execute("SELECT 1 FROM matches WHERE match_id = ?", (match_id,))
         if not cursor.fetchone():
-            return 0  # Return 0 to indicate the match was not found
+            return 0
 
-        # Delete from player_stats first (due to foreign key relationship)
         cursor.execute("DELETE FROM player_stats WHERE match_id = ?", (match_id,))
         stats_deleted_count = cursor.rowcount
 
-        # Then, delete the match itself
         cursor.execute("DELETE FROM matches WHERE match_id = ?", (match_id,))
         match_deleted_count = cursor.rowcount
 
         conn.commit()
         
-        # Return the total number of rows deleted
         return stats_deleted_count + match_deleted_count
     except sqlite3.Error as e:
         print(f"An error occurred while deleting match {match_id}: {e}")
@@ -956,4 +929,3 @@ def delete_match(match_id):
         return 0
     finally:
         conn.close()
-
