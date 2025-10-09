@@ -30,6 +30,7 @@ Paladins/
 
 * Python 3.8+
 * Bot Token from the Discord Developer portal
+* EasyOCR for text recognition capabilities
 
 ## Setup & Configuration
 
