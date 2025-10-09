@@ -116,7 +116,7 @@ def insert_scoreboard(scoreboard, queue_num):
             team = player["team"]
 
             cursor.execute(
-                "SELECT player_id, discord_id, alt_igns FROM players WHERE player_ign = ?;",
+                "SELECT player_id, discord_id, alt_igns FROM players WHERE player_ign = ? COLLATE NOCASE;",
                 (ign,),
             )
             result = cursor.fetchone()
@@ -126,7 +126,8 @@ def insert_scoreboard(scoreboard, queue_num):
                 for row in cursor.fetchall():
                     alt_player_id, discord_id, alt_igns_json = row
                     alt_igns = json.loads(alt_igns_json) if alt_igns_json else []
-                    if ign in alt_igns:
+                    # Case-insensitive check for alt IGNs
+                    if any(alt.lower() == ign.lower() for alt in alt_igns):
                         print(f"alt ign for user: {discord_id} -> {ign}")
                         player_id = alt_player_id
                         break
@@ -165,7 +166,7 @@ def link_ign(player_ign, discord_id, force=False):
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "SELECT discord_id FROM players WHERE player_ign = ?;", (player_ign,)
+            "SELECT discord_id FROM players WHERE player_ign = ? COLLATE NOCASE;", (player_ign,)
         )
         ign_result = cursor.fetchone()
         cursor.execute(
@@ -177,7 +178,7 @@ def link_ign(player_ign, discord_id, force=False):
             if not force:
                 return False
             cursor.execute(
-                "UPDATE players SET discord_id = ? WHERE player_ign = ?;",
+                "UPDATE players SET discord_id = ? WHERE player_ign = ? COLLATE NOCASE;",
                 (discord_id, player_ign),
             )
         elif disc_result:
@@ -321,11 +322,26 @@ def get_registered_igns(ign_list):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
+        # Use case-insensitive comparison
         placeholders = ",".join("?" for _ in ign_list)
-        query = f"SELECT player_ign FROM players WHERE player_ign IN ({placeholders});"
+        query = f"SELECT player_ign FROM players WHERE player_ign COLLATE NOCASE IN ({placeholders});"
         cursor.execute(query, ign_list)
-        registered = {row[0] for row in cursor.fetchall()}
-        not_registered = [ign for ign in ign_list if ign not in registered]
+        registered_db_igns = {row[0] for row in cursor.fetchall()}
+        
+        # Check which IGNs from the input list are registered (case-insensitive)
+        registered = []
+        not_registered = []
+        
+        for ign in ign_list:
+            found = False
+            for db_ign in registered_db_igns:
+                if db_ign.lower() == ign.lower():
+                    registered.append(db_ign)  # Use the DB version (preserves case)
+                    found = True
+                    break
+            if not found:
+                not_registered.append(ign)
+        
         return registered, not_registered
     finally:
         conn.close()
@@ -364,11 +380,12 @@ def get_ign_link_info(ign):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
-        cursor.execute("SELECT discord_id FROM players WHERE player_ign = ?;", (ign,))
+        # Use COLLATE NOCASE for case-insensitive comparison
+        cursor.execute("SELECT discord_id, player_ign FROM players WHERE player_ign = ? COLLATE NOCASE;", (ign,))
         result = cursor.fetchone()
         if result:
-            return result[0], True
-        return None, False
+            return result[0], True, result[1]  # Return actual stored IGN
+        return None, False, None
     finally:
         conn.close()
 
@@ -393,6 +410,47 @@ def get_alt_igns(discord_id):
         if result and result[0]:
             return json.loads(result[0])
         return []
+    finally:
+        conn.close()
+
+
+def unlink_ign(discord_id):
+    """Remove the Discord link from a player, keeping their IGN and stats intact."""
+    conn = sqlite3.connect("match_data.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "UPDATE players SET discord_id = NULL WHERE discord_id = ?;",
+            (discord_id,)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+    except sqlite3.Error as e:
+        print(f"An error occurred in unlink_ign: {e}")
+        return False
+    finally:
+        conn.close()
+
+
+def get_player_info(discord_id):
+    """Get complete player information including main IGN and alts."""
+    conn = sqlite3.connect("match_data.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            "SELECT player_ign, alt_igns FROM players WHERE discord_id = ?;",
+            (discord_id,)
+        )
+        result = cursor.fetchone()
+        if result:
+            main_ign = result[0]
+            alt_igns = json.loads(result[1]) if result[1] else []
+            return {
+                "main_ign": main_ign,
+                "alt_igns": alt_igns,
+                "all_igns": [main_ign] + alt_igns
+            }
+        return None
     finally:
         conn.close()
 
@@ -850,7 +908,7 @@ def get_discord_id_for_ign(ign):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     cursor.execute(
-        "SELECT discord_id FROM players WHERE player_ign LIKE ? AND discord_id IS NOT NULL;",
+        "SELECT discord_id FROM players WHERE player_ign LIKE ? COLLATE NOCASE AND discord_id IS NOT NULL;",
         (ign,)
     )
     result = cursor.fetchone()
