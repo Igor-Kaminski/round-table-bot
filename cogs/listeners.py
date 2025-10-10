@@ -14,6 +14,7 @@ from db import (
 )
 import easyocr
 import tempfile
+import os
 
 def parse_match_textbox(text):
     """Parses match scoreboard text into structured data."""
@@ -203,17 +204,22 @@ class Listeners(commands.Cog):
 
                 # Temporarily save attachments with the following file extensions
                 if attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    with tempfile.NamedTemporaryFile(delete=True, suffix=attachment.filename) as temp_img:
-                        await attachment.save(temp_img.name)
+                    extension = os.path.splitext(attachment.filename)[1]
+                    img_path = f"temp_{attachment.id}{extension}"
+                    try:
+                        await attachment.save(img_path)
 
                         # Attempt to extract the match id from the image
-                        match_id = self.get_match_id(temp_img.name)
+                        match_id = self.get_match_id(img_path)
 
                         # Send the match id in the chat if it was successfully extracted
                         if match_id:
                             await message.channel.send(f"Match ID: {match_id}")
                         else:
                             await message.channel.send("Match ID not found.")
+                    finally:
+                        if os.path.exists(img_path):
+                            os.remove(img_path)
 
     @commands.Cog.listener()
     async def on_message(self, message):
