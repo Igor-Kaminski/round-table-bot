@@ -18,7 +18,7 @@ class General(commands.Cog):
     async def link(self, ctx, ign: str):
         discord_id = str(ctx.author.id)
         try:
-            existing_discord_id, ign_exists = get_ign_link_info(ign)
+            existing_discord_id, ign_exists, _ = get_ign_link_info(ign)
             discord_id_ign = get_ign_for_discord_id(discord_id)
 
             if ign_exists and existing_discord_id == discord_id:
