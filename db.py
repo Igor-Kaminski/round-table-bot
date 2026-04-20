@@ -1,6 +1,48 @@
 import json
 import re
 import sqlite3
+import unicodedata
+
+
+def _norm(value):
+    """Return the NFC form of a string, trimmed of surrounding whitespace.
+
+    Scoreboard text and user input can arrive with composed (NFC) or decomposed
+    (NFD) accents. SQLite compares raw bytes, so matching requires normalising
+    both sides to the same form before comparison.
+    """
+    if value is None:
+        return None
+    return unicodedata.normalize("NFC", str(value)).strip()
+
+
+def _norm_lower(value):
+    """NFC-normalised, lower-cased key for case-insensitive equality checks."""
+    norm = _norm(value)
+    return norm.lower() if norm is not None else ""
+
+
+def _find_player_row_by_ign(cursor, ign):
+    """Find a ``players`` row whose main or alt IGN matches ``ign`` (NFC + case-insensitive).
+
+    Returns ``(player_id, player_ign, discord_id, alt_igns_list, matched_as_main)``
+    or ``None``. Uses a full scan so it transparently handles decomposed vs
+    composed accent forms that may be stored in the DB.
+    """
+    key = _norm_lower(ign)
+    if not key:
+        return None
+    cursor.execute("SELECT player_id, player_ign, discord_id, alt_igns FROM players;")
+    for player_id, player_ign, discord_id, alt_igns_json in cursor.fetchall():
+        try:
+            alts = json.loads(alt_igns_json) if alt_igns_json else []
+        except (json.JSONDecodeError, TypeError):
+            alts = []
+        if _norm_lower(player_ign) == key:
+            return player_id, player_ign, discord_id, alts, True
+        if any(_norm_lower(a) == key for a in alts):
+            return player_id, player_ign, discord_id, alts, False
+    return None
 
 def create_database():
     conn = sqlite3.connect("match_data.db")
@@ -70,8 +112,54 @@ def create_database():
         conn.commit()
         migrate_team_column()
 
+    _migrate_normalize_igns(cursor)
     conn.commit()
     conn.close()
+
+
+def _migrate_normalize_igns(cursor):
+    """One-shot migration: rewrite any non-NFC ``player_ign`` / ``alt_igns`` rows.
+
+    Safe to run repeatedly; rows already in NFC are left untouched. If two rows
+    collide after normalisation (e.g. one composed and one decomposed copy of
+    the same name) we merge their ``player_stats`` into the earlier ``player_id``.
+    """
+    try:
+        cursor.execute("SELECT player_id, player_ign, alt_igns FROM players;")
+        rows = cursor.fetchall()
+        seen = {}  # normalized lower IGN -> player_id
+        for player_id, player_ign, alt_igns_json in rows:
+            normalized = _norm(player_ign)
+            key = normalized.lower() if normalized else None
+
+            try:
+                alts = json.loads(alt_igns_json) if alt_igns_json else []
+            except (json.JSONDecodeError, TypeError):
+                alts = []
+            normalized_alts, seen_alts = [], set()
+            for alt in alts:
+                n_alt = _norm(alt)
+                if not n_alt:
+                    continue
+                if n_alt.lower() in seen_alts:
+                    continue
+                seen_alts.add(n_alt.lower())
+                normalized_alts.append(n_alt)
+
+            if key and key in seen and seen[key] != player_id:
+                # Duplicate (e.g. NFC vs NFD copies) — fold this row into the first one.
+                _merge_player_rows(cursor, seen[key], player_id)
+                continue
+
+            if player_ign != normalized or alts != normalized_alts:
+                cursor.execute(
+                    "UPDATE players SET player_ign = ?, alt_igns = ? WHERE player_id = ?;",
+                    (normalized, json.dumps(normalized_alts), player_id),
+                )
+            if key:
+                seen[key] = player_id
+    except sqlite3.Error as e:
+        print(f"Migration _migrate_normalize_igns failed: {e}")
 
 
 def insert_scoreboard(scoreboard, queue_num):
@@ -100,7 +188,7 @@ def insert_scoreboard(scoreboard, queue_num):
         )
 
         for player in players:
-            ign = player["name"]
+            ign = _norm(player["name"])
             champ = player["champ"]
             talent = player["talent"]
             credits = player["credits"]
@@ -115,30 +203,17 @@ def insert_scoreboard(scoreboard, queue_num):
             self_healing = player["self_healing"]
             team = player["team"]
 
-            cursor.execute(
-                "SELECT player_id, discord_id, alt_igns FROM players WHERE player_ign = ? COLLATE NOCASE;",
-                (ign,),
-            )
-            result = cursor.fetchone()
-            if not result:
-                cursor.execute("SELECT player_id, discord_id, alt_igns FROM players;")
-                player_id = None
-                for row in cursor.fetchall():
-                    alt_player_id, discord_id, alt_igns_json = row
-                    alt_igns = json.loads(alt_igns_json) if alt_igns_json else []
-                    # Case-insensitive check for alt IGNs
-                    if any(alt.lower() == ign.lower() for alt in alt_igns):
-                        print(f"alt ign for user: {discord_id} -> {ign}")
-                        player_id = alt_player_id
-                        break
-                if not player_id:
-                    cursor.execute(
-                        "INSERT INTO players (player_ign, alt_igns) VALUES (?, ?);",
-                        (ign, json.dumps([])),
-                    )
-                    player_id = cursor.lastrowid
+            match = _find_player_row_by_ign(cursor, ign)
+            if match:
+                player_id, _pign, _did, _alts, matched_as_main = match
+                if not matched_as_main:
+                    print(f"alt ign matched: player_id={player_id} -> {ign}")
             else:
-                player_id = result[0]
+                cursor.execute(
+                    "INSERT INTO players (player_ign, alt_igns) VALUES (?, ?);",
+                    (ign, json.dumps([])),
+                )
+                player_id = cursor.lastrowid
 
             cursor.execute(
                 """
@@ -161,40 +236,109 @@ def insert_scoreboard(scoreboard, queue_num):
         conn.close()
 
 
+def _merge_player_rows(cursor, keep_player_id, remove_player_id):
+    """Reassign all player_stats from one player row to another and delete the orphan row."""
+    if keep_player_id == remove_player_id:
+        return
+    cursor.execute(
+        "UPDATE player_stats SET player_id = ? WHERE player_id = ?;",
+        (keep_player_id, remove_player_id),
+    )
+    cursor.execute(
+        "DELETE FROM players WHERE player_id = ?;",
+        (remove_player_id,),
+    )
+
+
 def link_ign(player_ign, discord_id, force=False):
+    """Link `discord_id` to `player_ign`.
+
+    Handles merging stats from an unclaimed player row (created automatically
+    when scoreboards were ingested before the player linked) into the user's
+    existing row. Use `force=True` to replace an already-linked primary IGN.
+    Unicode-normalised (NFC) and case-insensitive throughout.
+    """
+    discord_id = str(discord_id)
+    player_ign = _norm(player_ign)
+    if not player_ign:
+        return False
+    ign_key = _norm_lower(player_ign)
+
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
-        cursor.execute(
-            "SELECT discord_id FROM players WHERE player_ign = ? COLLATE NOCASE;", (player_ign,)
-        )
-        ign_result = cursor.fetchone()
-        cursor.execute(
-            "SELECT player_ign FROM players WHERE discord_id = ?;", (discord_id,)
-        )
-        disc_result = cursor.fetchone()
+        ign_match = _find_player_row_by_ign(cursor, player_ign)
+        ign_row = None
+        if ign_match:
+            matched_player_id, _matched_pign, matched_discord_id, _matched_alts, matched_as_main = ign_match
+            if not matched_as_main and matched_discord_id and str(matched_discord_id) != discord_id:
+                # IGN already registered as another user's alt — refuse.
+                return False
+            if matched_as_main:
+                ign_row = (matched_player_id, matched_discord_id)
 
-        if ign_result:
+        cursor.execute(
+            "SELECT player_id, player_ign, alt_igns FROM players WHERE discord_id = ?;",
+            (discord_id,),
+        )
+        disc_row = cursor.fetchone()
+
+        if ign_row and disc_row and ign_row[0] == disc_row[0]:
+            return True
+
+        if ign_row and ign_row[1] and str(ign_row[1]) != discord_id:
+            return False
+
+        if ign_row and disc_row:
             if not force:
                 return False
+            alts = json.loads(disc_row[2]) if disc_row[2] else []
+            old_main = disc_row[1]
+            _merge_player_rows(cursor, disc_row[0], ign_row[0])
+            if old_main and _norm_lower(old_main) != ign_key and not any(
+                _norm_lower(a) == _norm_lower(old_main) for a in alts
+            ):
+                alts.append(_norm(old_main))
             cursor.execute(
-                "UPDATE players SET discord_id = ? WHERE player_ign = ? COLLATE NOCASE;",
-                (discord_id, player_ign),
+                "UPDATE players SET player_ign = ?, alt_igns = ? WHERE player_id = ?;",
+                (player_ign, json.dumps(alts), disc_row[0]),
             )
-        elif disc_result:
+            conn.commit()
+            return True
+
+        if ign_row and not disc_row:
             cursor.execute(
-                "UPDATE players SET player_ign = ? WHERE discord_id = ?;",
-                (player_ign, discord_id),
+                "UPDATE players SET discord_id = ?, player_ign = ? WHERE player_id = ?;",
+                (discord_id, player_ign, ign_row[0]),
             )
-        else:
+            conn.commit()
+            return True
+
+        if disc_row and not ign_row:
+            if not force:
+                return False
+            alts = json.loads(disc_row[2]) if disc_row[2] else []
+            old_main = disc_row[1]
+            if old_main and _norm_lower(old_main) != ign_key and not any(
+                _norm_lower(a) == _norm_lower(old_main) for a in alts
+            ):
+                alts.append(_norm(old_main))
             cursor.execute(
-                "INSERT INTO players (player_ign, discord_id, alt_igns) VALUES (?, ?, ?);",
-                (player_ign, discord_id, "[]"),
+                "UPDATE players SET player_ign = ?, alt_igns = ? WHERE player_id = ?;",
+                (player_ign, json.dumps(alts), disc_row[0]),
             )
+            conn.commit()
+            return True
+
+        cursor.execute(
+            "INSERT INTO players (player_ign, discord_id, alt_igns) VALUES (?, ?, ?);",
+            (player_ign, discord_id, "[]"),
+        )
         conn.commit()
         return True
     except sqlite3.Error as e:
         print(f"An error occurred in link_ign: {e}")
+        conn.rollback()
         return False
     finally:
         conn.close()
@@ -319,72 +463,134 @@ def queue_exists(queue_num):
 
 
 def get_registered_igns(ign_list):
+    """Return ``(registered, not_registered)`` split of the supplied IGN list.
+
+    An IGN counts as *registered* only if it matches the main ``player_ign`` or
+    any entry in ``alt_igns`` of a row that has a linked Discord account.
+    Matching is NFC-normalised and case-insensitive so that accented names like
+    ``Fúriä`` resolve regardless of whether the scoreboard text uses composed
+    or decomposed codepoints.
+    """
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
-        # Use case-insensitive comparison
-        placeholders = ",".join("?" for _ in ign_list)
-        query = f"SELECT player_ign FROM players WHERE player_ign COLLATE NOCASE IN ({placeholders});"
-        cursor.execute(query, ign_list)
-        registered_db_igns = {row[0] for row in cursor.fetchall()}
-        
-        # Check which IGNs from the input list are registered (case-insensitive)
+        cursor.execute(
+            "SELECT player_ign, alt_igns FROM players WHERE discord_id IS NOT NULL;"
+        )
+        registered_keys = {}
+        for player_ign, alt_igns_json in cursor.fetchall():
+            if player_ign:
+                registered_keys.setdefault(_norm_lower(player_ign), player_ign)
+            if alt_igns_json:
+                try:
+                    alts = json.loads(alt_igns_json)
+                except (json.JSONDecodeError, TypeError):
+                    alts = []
+                for alt in alts:
+                    if alt:
+                        registered_keys.setdefault(_norm_lower(alt), alt)
+
         registered = []
         not_registered = []
-        
         for ign in ign_list:
-            found = False
-            for db_ign in registered_db_igns:
-                if db_ign.lower() == ign.lower():
-                    registered.append(db_ign)  # Use the DB version (preserves case)
-                    found = True
-                    break
-            if not found:
+            key = _norm_lower(ign)
+            if key and key in registered_keys:
+                registered.append(registered_keys[key])
+            else:
                 not_registered.append(ign)
-        
         return registered, not_registered
     finally:
         conn.close()
 
 
 def add_alt_ign(discord_id, alt_ign):
+    """Add an alternate IGN to a linked player.
+
+    If an unclaimed ``players`` row already exists for this IGN (because matches
+    were ingested under it before the link), its ``player_stats`` are merged
+    into the main player's row so ``!stats`` shows combined history.
+    Unicode-normalised (NFC) and case-insensitive so accented names like
+    ``Fúriä`` match reliably.
+
+    Returns a dict with:
+        ``success`` (bool), ``merged_matches`` (int), and ``reason`` (str).
+    Possible ``reason`` values on failure: ``no_main_ign``, ``already_linked``,
+    ``duplicate_alt``, ``conflict_other_user``, ``empty``, ``db_error``.
+    """
+    result = {"success": False, "merged_matches": 0, "reason": None}
+
+    discord_id = str(discord_id)
+    alt_ign = _norm(alt_ign)
+    if not alt_ign:
+        result["reason"] = "empty"
+        return result
+
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "SELECT player_id, alt_igns FROM players WHERE discord_id = ?;", (discord_id,)
+            "SELECT player_id, player_ign, alt_igns FROM players WHERE discord_id = ?;", (discord_id,)
         )
-        result = cursor.fetchone()
-        if not result:
-            return False
-        player_id, alt_igns_json = result
+        row = cursor.fetchone()
+        if not row:
+            result["reason"] = "no_main_ign"
+            return result
+        player_id, main_ign, alt_igns_json = row
         alt_igns = json.loads(alt_igns_json) if alt_igns_json else []
-        if alt_ign not in alt_igns:
-            alt_igns.append(alt_ign)
-            cursor.execute(
-                "UPDATE players SET alt_igns = ? WHERE player_id = ?;",
-                (json.dumps(alt_igns), player_id),
-            )
-            conn.commit()
-            return True
-        else:
-            return False
+
+        alt_key = _norm_lower(alt_ign)
+        if alt_key == _norm_lower(main_ign):
+            result["reason"] = "already_linked"
+            return result
+        if any(_norm_lower(existing) == alt_key for existing in alt_igns):
+            result["reason"] = "duplicate_alt"
+            return result
+
+        match = _find_player_row_by_ign(cursor, alt_ign)
+        if match and match[4]:  # matched as main IGN on some row
+            other_player_id, _other_ign, other_discord_id, _other_alts, _ = match
+            if other_discord_id and str(other_discord_id) != discord_id:
+                result["reason"] = "conflict_other_user"
+                return result
+            if other_player_id != player_id:
+                cursor.execute(
+                    "SELECT COUNT(*) FROM player_stats WHERE player_id = ?;",
+                    (other_player_id,),
+                )
+                result["merged_matches"] = cursor.fetchone()[0]
+                _merge_player_rows(cursor, player_id, other_player_id)
+
+        alt_igns.append(alt_ign)
+        cursor.execute(
+            "UPDATE players SET alt_igns = ? WHERE player_id = ?;",
+            (json.dumps(alt_igns), player_id),
+        )
+        conn.commit()
+        result["success"] = True
+        return result
     except sqlite3.Error as e:
-        print(f"An error occurred: {e}")
-        return False
+        print(f"An error occurred in add_alt_ign: {e}")
+        conn.rollback()
+        result["reason"] = "db_error"
+        return result
     finally:
         conn.close()
 
 
 def get_ign_link_info(ign):
+    """Look up an IGN (NFC + case-insensitive) as a main ``player_ign``.
+
+    Returns ``(discord_id, True, stored_ign)`` if the IGN exists as the main
+    IGN of some row (``discord_id`` may be ``None`` if the row is unclaimed),
+    or ``(None, False, None)`` otherwise.
+    """
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
-        # Use COLLATE NOCASE for case-insensitive comparison
-        cursor.execute("SELECT discord_id, player_ign FROM players WHERE player_ign = ? COLLATE NOCASE;", (ign,))
-        result = cursor.fetchone()
-        if result:
-            return result[0], True, result[1]  # Return actual stored IGN
+        match = _find_player_row_by_ign(cursor, ign)
+        if match and match[4]:  # matched as main IGN
+            _pid, stored_ign, discord_id, _alts, _ = match
+            return discord_id, True, stored_ign
         return None, False, None
     finally:
         conn.close()
@@ -456,27 +662,29 @@ def get_player_info(discord_id):
 
 
 def delete_alt_ign(discord_id, alt_ign):
+    alt_key = _norm_lower(alt_ign)
+    if not alt_key:
+        return False
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
         cursor.execute(
-            "SELECT player_id, alt_igns FROM players WHERE discord_id = ?;", (discord_id,)
+            "SELECT player_id, alt_igns FROM players WHERE discord_id = ?;", (str(discord_id),)
         )
         result = cursor.fetchone()
         if not result:
             return False
         player_id, alt_igns_json = result
         alt_igns = json.loads(alt_igns_json) if alt_igns_json else []
-        if alt_ign in alt_igns:
-            alt_igns.remove(alt_ign)
-            cursor.execute(
-                "UPDATE players SET alt_igns = ? WHERE player_id = ?;",
-                (json.dumps(alt_igns), player_id),
-            )
-            conn.commit()
-            return True
-        else:
+        new_alts = [a for a in alt_igns if _norm_lower(a) != alt_key]
+        if len(new_alts) == len(alt_igns):
             return False
+        cursor.execute(
+            "UPDATE players SET alt_igns = ? WHERE player_id = ?;",
+            (json.dumps(new_alts), player_id),
+        )
+        conn.commit()
+        return True
     except sqlite3.Error as e:
         print(f"An error occurred: {e}")
         return False
@@ -687,14 +895,14 @@ def get_winrate_with_against(pid1, pid2):
     conn.close()
     return with_winrate, with_games, against_winrate, against_games
 
-def compare_players(discord_id1, discord_id2):
-    pid1 = get_player_id(discord_id1)
-    pid2 = get_player_id(discord_id2)
+def compare_by_player_ids(pid1, pid2):
     if not pid1 or not pid2:
         return None
 
     stats1 = get_player_stats(pid1)
     stats2 = get_player_stats(pid2)
+    if not stats1 or not stats2:
+        return None
     champs1 = get_top_champs(pid1)
     champs2 = get_top_champs(pid2)
     with_winrate, with_games, against_winrate, against_games = get_winrate_with_against(pid1, pid2)
@@ -704,6 +912,12 @@ def compare_players(discord_id1, discord_id2):
         "with_winrate": with_winrate, "with_games": with_games,
         "against_winrate": against_winrate, "against_games": against_games,
     }
+
+
+def compare_players(discord_id1, discord_id2):
+    pid1 = get_player_id(discord_id1)
+    pid2 = get_player_id(discord_id2)
+    return compare_by_player_ids(pid1, pid2)
 
 def get_match_history(player_id, limit: int = 30):
     conn = sqlite3.connect("match_data.db")
@@ -904,16 +1118,36 @@ def migrate_team_column():
         conn.close()
 
 
-def get_discord_id_for_ign(ign):
+def get_player_by_ign(ign):
+    """Look up a player (linked or not) by main IGN or alt IGN.
+
+    Matches are Unicode-normalised (NFC) and case-insensitive. Returns a dict
+    with ``player_id``, ``player_ign``, and ``discord_id`` (may be ``None`` for
+    unclaimed rows created by scoreboard ingestion), or ``None``.
+    """
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
-    cursor.execute(
-        "SELECT discord_id FROM players WHERE player_ign LIKE ? COLLATE NOCASE AND discord_id IS NOT NULL;",
-        (ign,)
-    )
-    result = cursor.fetchone()
-    conn.close()
-    return result[0] if result else None
+    try:
+        match = _find_player_row_by_ign(cursor, ign)
+        if match:
+            player_id, player_ign, discord_id, _alts, _ = match
+            return {"player_id": player_id, "player_ign": player_ign, "discord_id": discord_id}
+        return None
+    finally:
+        conn.close()
+
+
+def get_discord_id_for_ign(ign):
+    """Look up a linked Discord ID by main IGN or any stored alt IGN (NFC + case-insensitive)."""
+    conn = sqlite3.connect("match_data.db")
+    cursor = conn.cursor()
+    try:
+        match = _find_player_row_by_ign(cursor, ign)
+        if match and match[2]:  # discord_id not null
+            return match[2]
+        return None
+    finally:
+        conn.close()
 
 
 def get_champion_name(player_id, partial_name):

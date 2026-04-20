@@ -4,11 +4,10 @@ import discord
 from discord.ext import commands
 import os
 import time
-from utils.converters import PlayerConverter
+from utils.converters import PlayerConverter, resolve_player_id
 from utils.views import TopChampsView
 from core.constants import CHAMPION_ROLES, ROLE_ALIASES
 from db import (
-    get_player_id,
     get_player_stats,
     get_champion_name,
     get_all_champion_stats,
@@ -16,9 +15,18 @@ from db import (
     get_match_history,
     get_leaderboard,
     get_champion_leaderboard,
-    compare_players,
+    compare_by_player_ids,
     get_top_champs,
 )
+
+
+def _is_unlinked(target_user):
+    return getattr(target_user, "is_unlinked", False)
+
+
+def _avatar_url(target_user):
+    avatar = getattr(target_user, "display_avatar", None)
+    return getattr(avatar, "url", None) if avatar else None
 
 
 def get_champion_icon_path(champion_name):
@@ -31,12 +39,21 @@ class Stats(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
-    @commands.command(name="stats", help="Get stats for a player, with an optional champion or role filter.")
+    @commands.command(
+        name="stats",
+        help=(
+            "Get stats for a player, with an optional champion or role filter.\n"
+            "Usage: `!stats [user|ign] [champion|role]`\n"
+            "The user argument accepts a mention, Discord ID, `me`, a username, "
+            "a main IGN, an alt IGN, or even an unlinked IGN (match history only).\n"
+            "Examples: `!stats me`, `!stats @user tank`, `!stats Fúriä Lex`"
+        ),
+    )
     async def stats_cmd(self, ctx, user: PlayerConverter = None, *, filter_str: str = None):
         start_time = time.monotonic()
         target_user = user or ctx.author
-        
-        player_id = get_player_id(str(target_user.id))
+
+        player_id = resolve_player_id(target_user)
         if not player_id:
             await ctx.send(f"No stats found for {target_user.display_name}. They may need to link their IGN using `!link <ign>`.")
             return
@@ -63,7 +80,11 @@ class Stats(commands.Cog):
                     await ctx.send(f"No stats found for {target_user.display_name} playing the '{role_name}' role.")
                     return
 
-                embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=target_user.display_avatar.url)
+                author_icon = _avatar_url(target_user)
+                if author_icon:
+                    embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=author_icon)
+                else:
+                    embed.set_author(name=f"{target_user.display_name}'s Stats")
                 
                 data = {
                     f"--- Role: {role_name} ({role_stats['games']} games) ---": "",
@@ -109,7 +130,11 @@ class Stats(commands.Cog):
 
                 global_stats = get_player_stats(player_id)
 
-                embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=target_user.display_avatar.url)
+                author_icon = _avatar_url(target_user)
+                if author_icon:
+                    embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=author_icon)
+                else:
+                    embed.set_author(name=f"{target_user.display_name}'s Stats")
                 icon_path = get_champion_icon_path(full_champion_name)
                 if os.path.exists(icon_path):
                     icon_file = discord.File(icon_path, filename="icon.png")
@@ -158,7 +183,9 @@ class Stats(commands.Cog):
                 return
                 
             embed.title = f"Stats for {target_user.display_name}"
-            embed.set_thumbnail(url=target_user.display_avatar.url)
+            thumbnail_url = _avatar_url(target_user)
+            if thumbnail_url:
+                embed.set_thumbnail(url=thumbnail_url)
 
             data = {
                 "Winrate": f"{stats['winrate']:.2f}% ({stats['wins']}-{stats['losses']})",
@@ -192,9 +219,11 @@ class Stats(commands.Cog):
         # Set the footer
         fetch_time = (time.monotonic() - start_time) * 1000
         footer_text = f"Fetched in {fetch_time:.0f}ms"
-        if not filter_str:
+        if _is_unlinked(target_user):
+            footer_text = f"Unlinked IGN: {target_user.display_name}    •   {footer_text}"
+        elif not filter_str:
             footer_text = f"Player ID: {target_user.id}    •   {footer_text}"
-        embed.set_footer(text=footer_text, icon_url=ctx.guild.icon.url if ctx.guild.icon else None)
+        embed.set_footer(text=footer_text, icon_url=ctx.guild.icon.url if ctx.guild and ctx.guild.icon else None)
 
         await ctx.send(embed=embed, file=icon_file)
 
@@ -335,7 +364,7 @@ Shows champion statistics breakdown for a player.
                     champion_filter = filter_str
         
         # Get player ID
-        player_id = get_player_id(str(target_user.id))
+        player_id = resolve_player_id(target_user)
         if not player_id:
             await ctx.send(f"No stats found for {target_user.display_name}. They may need to `!link` their IGN.")
             return
@@ -548,7 +577,14 @@ Shows champion statistics breakdown for a player.
         
         await ctx.send(embed=embed)
 
-    @commands.command(name="history", help="Shows recent matches. Ex: !history 10, !history @user 5 | Max 20")
+    @commands.command(
+        name="history",
+        help=(
+            "Show recent matches for a player (max 20).\n"
+            "Usage: `!history [user|ign] [count]`\n"
+            "Examples: `!history 10`, `!history @user 5`, `!history Fúriä 8`"
+        ),
+    )
     async def history_cmd(self, ctx, *args):
         target_user = ctx.author
         limit = 20  # Default to 20
@@ -571,7 +607,7 @@ Shows champion statistics breakdown for a player.
         # MODIFIED: The maximum number of matches is now capped at 20.
         limit = max(1, min(limit, 20))
 
-        player_id = get_player_id(str(target_user.id))
+        player_id = resolve_player_id(target_user)
         if not player_id:
             await ctx.send(
                 f"No history found for {target_user.display_name}. They may need to link their IGN using `!link <ign>`."
@@ -774,7 +810,15 @@ Shows player rankings, with optional filters for champions or roles.
         embed.description = "\n".join(description)
         await ctx.send(embed=embed)
 
-    @commands.command(name="compare", help="Compare stats between two players.")
+    @commands.command(
+        name="compare",
+        help=(
+            "Head-to-head comparison between two players.\n"
+            "Usage: `!compare <user1|ign> [user2|ign]`\n"
+            "If the second player is omitted, compares against you. Each argument "
+            "accepts mentions, IDs, usernames, main IGNs, or alt IGNs."
+        ),
+    )
     async def compare_cmd(self, ctx, user1: PlayerConverter, user2: PlayerConverter = None):
         # If user2 is not provided, default to the command author
         user2 = user2 or ctx.author
@@ -782,8 +826,14 @@ Shows player rankings, with optional filters for champions or roles.
         if user1 == user2:
             await ctx.send("You can't compare a player to themselves!")
             return
-            
-        result = compare_players(str(user1.id), str(user2.id))
+
+        pid1 = resolve_player_id(user1)
+        pid2 = resolve_player_id(user2)
+        if not pid1 or not pid2:
+            await ctx.send("Could not find stats for one or both players. Ensure they have linked their IGNs.")
+            return
+
+        result = compare_by_player_ids(pid1, pid2)
         if not result:
             await ctx.send("Could not find stats for one or both players. Ensure they have linked their IGNs.")
             return
@@ -797,8 +847,16 @@ Shows player rankings, with optional filters for champions or roles.
             description="Here's how their stats stack up.",
             color=0x3498DB
         )
-        embed.set_author(name=user1.display_name, icon_url=user1.display_avatar.url)
-        embed.set_footer(text=f"Compared with {user2.display_name}", icon_url=user2.display_avatar.url)
+        user1_icon = _avatar_url(user1)
+        user2_icon = _avatar_url(user2)
+        if user1_icon:
+            embed.set_author(name=user1.display_name, icon_url=user1_icon)
+        else:
+            embed.set_author(name=user1.display_name)
+        embed.set_footer(
+            text=f"Compared with {user2.display_name}",
+            icon_url=user2_icon if user2_icon else None,
+        )
 
         # --- Helper logic for adding winner emojis ---
         def get_emoji(stat1, stat2):

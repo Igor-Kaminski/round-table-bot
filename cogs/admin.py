@@ -10,7 +10,6 @@ from db import (
     update_discord_id,
     execute_select_query,
     insert_embed,
-    add_alt_ign,
     get_alt_igns,
     delete_alt_ign,
     get_player_id,
@@ -78,16 +77,10 @@ class Admin(commands.Cog):
             print(f"Error in fetch_embeds command: {e}")
             await ctx.send("An error occurred while fetching embeds.")
 
-    @commands.command(name="add_alt", help="Add an alternate IGN for a player. Execs only.")
-    @commands.check(is_exec)
-    async def add_alt_ign_cmd(self, ctx, user: discord.Member, alt_ign: str):
-        success = add_alt_ign(str(user.id), alt_ign)
-        if success:
-            await ctx.send(f"Added alt IGN `{alt_ign}` for {user.mention}.")
-        else:
-            await ctx.send(f"Failed to add alt IGN `{alt_ign}` for {user.mention}. It may already exist.")
-
-    @commands.command(name="show_alts", help="Show all alternate IGNs for a player. Execs only.")
+    @commands.command(
+        name="show_alts",
+        help="Show all alternate IGNs for a player. Execs only. (Users can see their own with `!alts`.)",
+    )
     @commands.check(is_exec)
     async def show_alt_igns_cmd(self, ctx, user: discord.Member):
         alt_igns = get_alt_igns(str(user.id))
@@ -96,10 +89,13 @@ class Admin(commands.Cog):
         else:
             await ctx.send(f"No alternate IGNs found for {user.mention}.")
 
-    @commands.command(name="delete_alt", help="Delete an alternate IGN for a player. Execs only.")
+    @commands.command(
+        name="delete_alt",
+        help="Delete an alternate IGN for a player. Execs only. Usage: `!delete_alt @user <alt_ign>`",
+    )
     @commands.check(is_exec)
-    async def delete_alt_ign_cmd(self, ctx, user: discord.Member, alt_ign: str):
-        success = delete_alt_ign(str(user.id), alt_ign)
+    async def delete_alt_ign_cmd(self, ctx, user: discord.Member, *, alt_ign: str):
+        success = delete_alt_ign(str(user.id), alt_ign.strip())
         if success:
             await ctx.send(f"Deleted alt IGN `{alt_ign}` for {user.mention}.")
         else:
