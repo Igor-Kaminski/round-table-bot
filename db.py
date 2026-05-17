@@ -1098,6 +1098,58 @@ def get_match_history(player_id, limit: int = 30):
     finally:
         conn.close()
 
+
+def get_player_map_winrates(player_id, champions=None, filters=None, min_games=1):
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        where_conditions = ["ps.player_id = ?"]
+        params = [player_id]
+
+        if champions:
+            placeholders = ', '.join('?' for _ in champions)
+            where_conditions.append(f"ps.champ IN ({placeholders})")
+            params.extend(champions)
+
+        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+        where_clause = " AND ".join(where_conditions)
+
+        query = f"""
+            SELECT
+                m.map,
+                COUNT(ps.match_id) AS games,
+                SUM(
+                    CASE
+                        WHEN (ps.team = 1 AND m.team1_score > m.team2_score)
+                          OR (ps.team = 2 AND m.team2_score > m.team1_score)
+                        THEN 1 ELSE 0
+                    END
+                ) AS wins
+            FROM player_stats ps
+            JOIN matches m ON ps.match_id = m.match_id
+            WHERE {where_clause}
+            GROUP BY m.map
+            HAVING games >= ?
+            ORDER BY (CAST(wins AS REAL) / games) DESC, games DESC, m.map ASC;
+        """
+        cursor.execute(query, params + [min_games])
+        rows = []
+        for row in cursor.fetchall():
+            wins = row["wins"] or 0
+            games = row["games"] or 0
+            rows.append({
+                "map": row["map"],
+                "games": games,
+                "wins": wins,
+                "losses": games - wins,
+                "winrate": round((wins / games) * 100, 2) if games else 0,
+            })
+        return rows
+    finally:
+        conn.close()
+
+
 def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None, min_games=1, filters=None):
     stat_expressions = {
         "winrate": "SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) * 100.0 / COUNT(ps.match_id)",

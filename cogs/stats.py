@@ -13,6 +13,7 @@ from db import (
     get_all_champion_stats,
     get_player_champion_stats,
     get_match_history,
+    get_player_map_winrates,
     get_leaderboard,
     get_champion_leaderboard,
     compare_by_player_ids,
@@ -245,6 +246,7 @@ class Stats(commands.Cog):
             "champlb": "Champion Leaderboard Examples",
             "championleaderboard": "Champion Leaderboard Examples",
             "map": "Map Examples",
+            "mapwr": "Map Winrate Examples",
             "filters": "Filter Examples",
             "filter": "Filter Examples",
             "aliases": "Alias Examples",
@@ -254,6 +256,7 @@ class Stats(commands.Cog):
             "overview": [
                 "`!examples stats` - Player stat examples.",
                 "`!examples top` - Personal champion table examples.",
+                "`!examples mapwr` - Player map winrate examples.",
                 "`!examples lb` - Player leaderboard examples.",
                 "`!examples clb` - Champion leaderboard examples.",
                 "`!examples map` - Map shortcut examples.",
@@ -323,6 +326,18 @@ class Stats(commands.Cog):
                 "`!map ice mines wr off tank losses` - Off tank WR in losses on Ice Mines.",
                 "`!map splitstone quarry wr ash against nozy` - Ash WR against nozy on Splitstone Quarry.",
             ],
+            "mapwr": [
+                "`!mapwr` - Your winrate on every map.",
+                "`!mapwr me` - Same thing, explicit self lookup.",
+                "`!mapwr Eagle` - Eagle's map winrates.",
+                "`!mapwr Eagle ying` - Eagle's Ying map winrates.",
+                "`!mapwr Eagle support` - Eagle's support map winrates.",
+                "`!mapwr Eagle point tank` - Eagle's point tank map winrates.",
+                "`!mapwr Eagle off tank` - Eagle's off tank map winrates.",
+                "`!mapwr me barik team2` - Your Barik map WR on Team 2.",
+                "`!mapwr Eagle moji losses` - Eagle's Moji map records in losses only.",
+                "`!mapwr Eagle inara 4-3` - Eagle's Inara map WR in 4-3 games.",
+            ],
             "filters": [
                 "`team1` / `team2` - Filter by draft side, e.g. `!lb wr barik team2`.",
                 "`4-3` - Exact scoreline, e.g. `!lb wr inara 4-3`.",
@@ -354,6 +369,10 @@ class Stats(commands.Cog):
             "champlb": "clb",
             "champleaderboard": "clb",
             "championleaderboard": "clb",
+            "mapwinrate": "mapwr",
+            "mapwinrates": "mapwr",
+            "mapstats": "mapwr",
+            "maps": "mapwr",
             "filter": "filters",
             "alias": "aliases",
         }
@@ -1029,6 +1048,115 @@ Shows champion statistics breakdown for a player.
 
         output = f"Last {len(history)} Matches for {target_user.display_name}\n\n" + "\n".join(lines)
         await ctx.send(f"```diff\n{output}\n```")
+
+    MAP_WINRATES_HELP = """
+Show a player's winrate on every map, with optional role/champion filters.
+
+**Usage:** `!mapwr [user|ign] [champion|role] [-m <games>] [filters]`
+
+**Roles:** `damage`, `flank`, `support`, `tank`, `point tank`, `off tank`
+**Filters:** `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `with <player>`, `against <player>`
+
+**Examples:**
+- `!mapwr` - Your map winrates.
+- `!mapwr Eagle` - Eagle's map winrates.
+- `!mapwr Eagle ying` - Eagle's Ying map winrates.
+- `!mapwr Eagle support` - Eagle's support map winrates.
+- `!mapwr Eagle point tank` - Eagle's point tank map winrates.
+- `!mapwr me barik team2` - Your Barik map winrates on Team 2.
+- `!mapwr Eagle inara 4-3` - Eagle's Inara map winrates in 4-3 games.
+"""
+
+    @commands.command(name="mapwr", aliases=["map_wr", "maps", "mapstats"], help=MAP_WINRATES_HELP)
+    async def map_winrates_cmd(self, ctx, *args):
+        args, match_filters, filter_error = await _extract_match_filters(ctx, args)
+        if filter_error:
+            await ctx.send(filter_error)
+            return
+
+        target_user = ctx.author
+        filter_args = list(args)
+        min_games = 1
+
+        i = 0
+        cleaned_args = []
+        while i < len(filter_args):
+            arg = str(filter_args[i])
+            if arg.lower() == "-m":
+                if i + 1 < len(filter_args) and str(filter_args[i + 1]).isdigit():
+                    min_games = max(1, int(filter_args[i + 1]))
+                    i += 2
+                    continue
+                await ctx.send("`-m` needs a number after it, like `!mapwr Eagle -m 3`.")
+                return
+            cleaned_args.append(arg)
+            i += 1
+        filter_args = cleaned_args
+
+        if filter_args:
+            for end in range(len(filter_args), 0, -1):
+                candidate = " ".join(filter_args[:end])
+                try:
+                    target_user = await PlayerConverter().convert(ctx, candidate)
+                    filter_args = filter_args[end:]
+                    break
+                except commands.BadArgument:
+                    continue
+
+        player_id = resolve_player_id(target_user)
+        if not player_id:
+            await ctx.send(f"No stats found for {target_user.display_name}. They may need to link their IGN using `!link <ign>`.")
+            return
+
+        filter_name = None
+        champions = None
+        if filter_args:
+            filter_str = " ".join(filter_args).lower()
+            role_name = resolve_role_name(filter_str)
+            if role_name:
+                champions = get_champions_for_role(role_name)
+                filter_name = role_name
+            else:
+                champion_name = resolve_champion_name(filter_str) or get_champion_name(player_id, filter_str)
+                if not champion_name:
+                    await ctx.send(f"No champion or role found matching `{filter_str}`.")
+                    return
+                champions = [champion_name]
+                filter_name = champion_name
+
+        rows = get_player_map_winrates(player_id, champions=champions, filters=match_filters, min_games=min_games)
+        if not rows:
+            detail = f" for {filter_name}" if filter_name else ""
+            await ctx.send(f"No map winrate data found for {target_user.display_name}{detail}.")
+            return
+
+        title = f"Map Winrates for {target_user.display_name}"
+        if filter_name:
+            title += f" on {filter_name}"
+        title += _title_filter_suffix(match_filters)
+
+        embed = discord.Embed(title=title, color=discord.Color.blue())
+        rows = rows[:35]
+        name_width = min(24, max(len(row["map"]) for row in rows))
+        header = f"{'Map':<{name_width}}  {'Record':<7} {'WR':>7}"
+        lines = [header, "-" * len(header)]
+        for row in rows:
+            map_name = row["map"]
+            if len(map_name) > name_width:
+                map_name = map_name[:name_width - 1] + "…"
+            record = f"{row['wins']}-{row['losses']}"
+            lines.append(f"{map_name:<{name_width}}  {record:<7} {row['winrate']:>6.2f}%")
+
+        embed.description = "```\n" + "\n".join(lines) + "\n```"
+        footer_parts = []
+        if min_games > 1:
+            footer_parts.append(f"Maps must have at least {min_games} games.")
+        active_filters = _filter_summary(match_filters)
+        if active_filters:
+            footer_parts.append("Filters: " + "; ".join(active_filters))
+        if footer_parts:
+            embed.set_footer(text=" • ".join(footer_parts))
+        await ctx.send(embed=embed)
 
     LEADERBOARD_HELP = """
 Shows player rankings, with optional filters for champions or roles.
