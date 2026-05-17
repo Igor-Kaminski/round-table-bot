@@ -6,7 +6,7 @@ import os
 import time
 from utils.converters import PlayerConverter, resolve_player_id
 from utils.views import TopChampsView
-from core.constants import CHAMPION_ROLES, ROLE_ALIASES
+from core.constants import CHAMPION_ROLES, get_champions_for_role, resolve_champion_name, resolve_role_name
 from db import (
     get_player_stats,
     get_champion_name,
@@ -17,6 +17,7 @@ from db import (
     get_champion_leaderboard,
     compare_by_player_ids,
     get_top_champs,
+    resolve_map_name,
 )
 
 
@@ -35,23 +36,383 @@ def get_champion_icon_path(champion_name):
     return os.path.join("icons", "champ_icons", f"{formatted_name}.png")
 
 
+RESULT_FILTER_ALIASES = {
+    "win": "wins", "wins": "wins", "won": "wins", "wonly": "wins",
+    "winonly": "wins", "winsonly": "wins",
+    "loss": "losses", "losses": "losses", "lost": "losses", "lonly": "losses",
+    "lossonly": "losses", "lossesonly": "losses",
+}
+
+TEAM_FILTER_ALIASES = {
+    "team1": 1, "t1": 1, "first": 1, "fp": 1, "firstpick": 1,
+    "team2": 2, "t2": 2, "second": 2, "lastpick": 2, "lp": 2,
+}
+
+SCORE_FILTER_ALIASES = {
+    "close": "close", "closegame": "close",
+    "stomp": "stomp", "stomps": "stomp",
+    "sweep": "sweep", "sweeps": "sweep",
+}
+
+FILTER_KEYWORDS = {
+    "map", "with", "against",
+    *RESULT_FILTER_ALIASES.keys(),
+    *TEAM_FILTER_ALIASES.keys(),
+    *SCORE_FILTER_ALIASES.keys(),
+}
+
+
+def _compact_arg(arg):
+    return str(arg).lower().replace("_", "").replace("-", "").replace("'", "")
+
+
+def _parse_scoreline(arg):
+    if "-" not in arg:
+        return None
+    left, right = arg.split("-", 1)
+    if left.isdigit() and right.isdigit():
+        return int(left), int(right)
+    return None
+
+
+def _filter_summary(filters):
+    if not filters:
+        return []
+
+    labels = []
+    if filters.get("map"):
+        labels.append(f"Map: {filters['map']}")
+    if filters.get("result") == "wins":
+        labels.append("Wins Only")
+    elif filters.get("result") == "losses":
+        labels.append("Losses Only")
+    if filters.get("team") == 1:
+        labels.append("Team 1")
+    elif filters.get("team") == 2:
+        labels.append("Team 2")
+    if filters.get("scoreline"):
+        labels.append(f"Scoreline {filters['scoreline'][0]}-{filters['scoreline'][1]}")
+    elif filters.get("score_category") == "close":
+        labels.append("Close Games")
+    elif filters.get("score_category") == "stomp":
+        labels.append("Stomps")
+    elif filters.get("score_category") == "sweep":
+        labels.append("Sweeps")
+    if filters.get("with_player_name"):
+        labels.append(f"With {filters['with_player_name']}")
+    if filters.get("against_player_name"):
+        labels.append(f"Against {filters['against_player_name']}")
+    return labels
+
+
+def _title_filter_suffix(filters):
+    parts = []
+    if filters.get("map"):
+        parts.append(f"on {filters['map']}")
+    if filters.get("result") == "wins":
+        parts.append("in Wins")
+    elif filters.get("result") == "losses":
+        parts.append("in Losses")
+    if filters.get("team") == 1:
+        parts.append("on Team 1")
+    elif filters.get("team") == 2:
+        parts.append("on Team 2")
+    if filters.get("scoreline"):
+        parts.append(f"at {filters['scoreline'][0]}-{filters['scoreline'][1]}")
+    elif filters.get("score_category") == "close":
+        parts.append("in Close Games")
+    elif filters.get("score_category") == "stomp":
+        parts.append("in Stomps")
+    elif filters.get("score_category") == "sweep":
+        parts.append("in Sweeps")
+    if filters.get("with_player_name"):
+        parts.append(f"with {filters['with_player_name']}")
+    if filters.get("against_player_name"):
+        parts.append(f"against {filters['against_player_name']}")
+    return " " + " ".join(parts) if parts else ""
+
+
+async def _extract_match_filters(ctx, args):
+    args = list(args)
+    filters = {}
+    remaining = []
+    i = 0
+
+    while i < len(args):
+        arg = str(args[i])
+        raw_key = arg.lower()
+        key = _compact_arg(arg)
+
+        if key == "map":
+            resolved_map = None
+            consumed_until = i + 1
+            for end in range(len(args), i + 1, -1):
+                candidate = " ".join(str(part) for part in args[i + 1:end])
+                resolved_map = resolve_map_name(candidate)
+                if resolved_map:
+                    consumed_until = end
+                    break
+            if not resolved_map:
+                return remaining, filters, f"Could not find a map matching `{arg if i + 1 >= len(args) else args[i + 1]}`."
+            filters["map"] = resolved_map
+            i = consumed_until
+            continue
+
+        if key == "only":
+            i += 1
+            continue
+
+        if key in RESULT_FILTER_ALIASES:
+            filters["result"] = RESULT_FILTER_ALIASES[key]
+            i += 1
+            continue
+
+        if key == "team" and i + 1 < len(args) and _compact_arg(args[i + 1]) in {"1", "2"}:
+            filters["team"] = int(_compact_arg(args[i + 1]))
+            i += 2
+            continue
+
+        if key in {"first", "last"} and i + 1 < len(args) and _compact_arg(args[i + 1]) == "pick":
+            filters["team"] = 1 if key == "first" else 2
+            i += 2
+            continue
+
+        if key in TEAM_FILTER_ALIASES:
+            filters["team"] = TEAM_FILTER_ALIASES[key]
+            i += 1
+            continue
+
+        if key in SCORE_FILTER_ALIASES:
+            filters["score_category"] = SCORE_FILTER_ALIASES[key]
+            filters.pop("scoreline", None)
+            i += 1
+            continue
+
+        scoreline = _parse_scoreline(raw_key)
+        if scoreline:
+            filters["scoreline"] = scoreline
+            filters.pop("score_category", None)
+            i += 1
+            continue
+
+        if key in {"with", "against"}:
+            if i + 1 >= len(args):
+                return remaining, filters, f"`{arg}` needs a player after it."
+            player_arg = str(args[i + 1])
+            try:
+                player = await PlayerConverter().convert(ctx, player_arg)
+            except commands.BadArgument as exc:
+                return remaining, filters, str(exc)
+
+            player_id = resolve_player_id(player)
+            if not player_id:
+                return remaining, filters, f"No stats found for `{player_arg}`."
+
+            filters[f"{key}_player_id"] = player_id
+            filters[f"{key}_player_name"] = player.display_name
+            i += 2
+            continue
+
+        remaining.append(arg)
+        i += 1
+
+    return remaining, filters, None
+
+
+def _resolve_leading_map(args):
+    args = list(args)
+    for end in range(len(args), 0, -1):
+        candidate = " ".join(str(part) for part in args[:end])
+        resolved_map = resolve_map_name(candidate)
+        if resolved_map:
+            return resolved_map, args[end:]
+    return None, args
+
+
 class Stats(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    def _examples_embed(self, topic=None):
+        topic_key = _compact_arg(topic or "overview")
+        topic_titles = {
+            "overview": "Command Examples",
+            "stats": "Stats Examples",
+            "top": "Top Examples",
+            "lb": "Leaderboard Examples",
+            "leaderboard": "Leaderboard Examples",
+            "clb": "Champion Leaderboard Examples",
+            "champlb": "Champion Leaderboard Examples",
+            "championleaderboard": "Champion Leaderboard Examples",
+            "map": "Map Examples",
+            "filters": "Filter Examples",
+            "filter": "Filter Examples",
+            "aliases": "Alias Examples",
+            "alias": "Alias Examples",
+        }
+        examples_by_topic = {
+            "overview": [
+                "`!examples stats` - Player stat examples.",
+                "`!examples top` - Personal champion table examples.",
+                "`!examples lb` - Player leaderboard examples.",
+                "`!examples clb` - Champion leaderboard examples.",
+                "`!examples map` - Map shortcut examples.",
+                "`!examples filters` - Every filter style with examples.",
+                "`!stats me` - Your overall stats.",
+                "`!lb kp moji` - Moji kill participation leaderboard.",
+                "`!map jaguar falls wr ying` - Ying WR on Jaguar Falls.",
+                "`!clb wr support team1 map stone keep night` - Support champion WR on Team 1 for Stone Keep Night.",
+            ],
+            "stats": [
+                "`!stats me` - Your overall stats.",
+                "`!stats me support` - Your support stats.",
+                "`!stats me point tank` - Your point tank stats.",
+                "`!stats me off tank` - Your off tank stats.",
+                "`!stats @user moji` - A user's Moji stats.",
+                "`!stats pjamo damba wins` - Mal'Damba stats in wins only.",
+                "`!stats me ying map jaguar falls` - Ying stats on Jaguar Falls.",
+                "`!stats me fernando team2` - Fernando stats on Team 2.",
+                "`!stats me moji 4-3` - Moji stats in games ending 4-3.",
+                "`!stats me barik with lulub against nozy` - Barik stats with lulub against nozy.",
+            ],
+            "top": [
+                "`!top` - Your champion table.",
+                "`!top me -wr -kp -dhpm support` - Support table with WR, KP, and DPM+HPM.",
+                "`!top me point tank` - Your point tank champion table.",
+                "`!top me off tank` - Your off tank champion table.",
+                "`!top me bk` - Your Bomb King table.",
+                "`!top @user -dmg -heal_pm ying` - A user's Ying damage and healing/min.",
+                "`!top me barik map jaguar falls` - Barik on Jaguar Falls.",
+                "`!top me nyx team1` - Nyx on Team 1.",
+                "`!top me ash losses` - Ash in losses only.",
+                "`!top me fernando 4-3 with pjamo` - Fernando in 4-3 games with pjamo.",
+            ],
+            "leaderboard": [
+                "`!lb` - Player winrate leaderboard.",
+                "`!lb wr ying` - Ying winrate leaderboard.",
+                "`!lb kp moji` - Moji KP leaderboard.",
+                "`!lb dhpm ying` - Ying damage+healing/min leaderboard.",
+                "`!lb wr barik team2` - Barik WR on Team 2.",
+                "`!lb wr inara 4-3` - Inara WR in 4-3 games.",
+                "`!lb wr ash against nozy` - Ash WR against nozy.",
+                "`!lb dmg bk wins` - Bomb King damage/min in wins.",
+                "`!lb wr point tank map jaguar falls` - Point tank WR on Jaguar Falls.",
+                "`!lb wr off tank losses with lulub` - Off tank WR in losses with lulub.",
+            ],
+            "clb": [
+                "`!clb` - Champion winrate leaderboard.",
+                "`!clb wr support` - Support champion WR.",
+                "`!clb wr point tank` - Point tank champion WR.",
+                "`!clb wr off tank` - Off tank champion WR.",
+                "`!clb dhpm support` - Support champion damage+healing/min.",
+                "`!clb kp close` - Champion KP in close games.",
+                "`!clb wr flank losses` - Flank champion WR in losses.",
+                "`!clb dmg damage team2 stomp` - Damage champion damage/min on Team 2 in stomps.",
+                "`!clb wr support against nozy` - Support champion WR against nozy.",
+                "`!clb wr point tank map stone keep night` - Point tank WR on Stone Keep Night.",
+            ],
+            "map": [
+                "`!map jaguar falls` - Winrate leaderboard on Jaguar Falls.",
+                "`!map brightmarsh wr ying` - Ying WR on Brightmarsh.",
+                "`!map stone keep night kp moji` - Moji KP on Stone Keep Night.",
+                "`!map ascension peak dmg bk 10` - Top 10 Bomb King damage/min on Ascension Peak.",
+                "`!map serpent beach wr barik team2` - Barik WR on Team 2 on Serpent Beach.",
+                "`!map jaguar falls wr inara 4-3` - Inara WR in 4-3 games on Jaguar Falls.",
+                "`!map brightmarsh dhpm support` - Support damage+healing/min on Brightmarsh.",
+                "`!map frog isle wr point tank` - Point tank WR on Frog Isle.",
+                "`!map ice mines wr off tank losses` - Off tank WR in losses on Ice Mines.",
+                "`!map splitstone quarry wr ash against nozy` - Ash WR against nozy on Splitstone Quarry.",
+            ],
+            "filters": [
+                "`team1` / `team2` - Filter by draft side, e.g. `!lb wr barik team2`.",
+                "`4-3` - Exact scoreline, e.g. `!lb wr inara 4-3`.",
+                "`close` - Any one-point game, e.g. `!lb kp moji close`.",
+                "`stomp` - Big margin games, e.g. `!clb dmg damage stomp`.",
+                "`sweep` - 4-0 games, e.g. `!lb wr bk sweep`.",
+                "`wins` - Wins only, e.g. `!stats me damba wins`.",
+                "`losses` - Losses only, e.g. `!lb kp moji losses`.",
+                "`map <name>` - Map filter, e.g. `!lb wr ying map jaguar falls`.",
+                "`with <player>` - Same team, e.g. `!lb wr barik with pjamo`.",
+                "`against <player>` - Enemy team, e.g. `!lb wr ash against nozy`.",
+            ],
+            "aliases": [
+                "`bk` = Bomb King, e.g. `!lb dmg bk`.",
+                "`damba` = Mal'Damba, e.g. `!stats me damba`.",
+                "`andy` = Androxus, e.g. `!lb wr andy`.",
+                "`ruk` = Ruckus, e.g. `!top me ruk`.",
+                "`dmg` = Damage role, e.g. `!clb wr dmg`.",
+                "`sup` / `supp` = Support role, e.g. `!lb dhpm sup`.",
+                "`tank` / `frontline` = all tanks, e.g. `!lb wr tank`.",
+                "`point tank` / `pt` = Barik, Fernando, Inara, Nyx, Terminus.",
+                "`off tank` / `ot` = every other frontline.",
+                "`dhpm` = damage+healing per minute, e.g. `!lb dhpm ying`.",
+            ],
+        }
+        aliases = {
+            "lb": "leaderboard",
+            "champ": "clb",
+            "champlb": "clb",
+            "champleaderboard": "clb",
+            "championleaderboard": "clb",
+            "filter": "filters",
+            "alias": "aliases",
+        }
+        topic_key = aliases.get(topic_key, topic_key)
+        if topic_key not in examples_by_topic:
+            topic_key = "overview"
+
+        embed = discord.Embed(
+            title=topic_titles.get(topic_key, "Command Examples"),
+            description="Use `!examples stats`, `!examples lb`, `!examples map`, or `!examples filters` for focused examples.",
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Examples", value="\n".join(examples_by_topic[topic_key]), inline=False)
+        return embed
+
+    @commands.command(
+        name="examples",
+        aliases=["example"],
+        help=(
+            "Show useful command examples. Usage: `!examples [stats|top|lb|clb|map|filters|aliases]`.\n"
+            "Examples: `!examples`, `!examples lb`, `!examples filters`, `!examples stats`, `!examples map`."
+        ),
+    )
+    async def examples_cmd(self, ctx, *, topic: str = None):
+        await ctx.send(embed=self._examples_embed(topic))
+
+    @commands.command(
+        name="filters",
+        aliases=["filter"],
+        help="Show available match filters. Examples: `!filters`, `!examples filters`, `!help filters`.",
+    )
+    async def filters_cmd(self, ctx):
+        await ctx.send(embed=self._examples_embed("filters"))
+
     @commands.command(
         name="stats",
         help=(
-            "Get stats for a player, with an optional champion or role filter.\n"
-            "Usage: `!stats [user|ign] [champion|role]`\n"
+            "Get stats for a player, with optional champion, role, and match filters.\n"
+            "Usage: `!stats [user|ign] [champion|role] [filters]`\n"
             "The user argument accepts a mention, Discord ID, `me`, a username, "
             "a main IGN, an alt IGN, or even an unlinked IGN (match history only).\n"
-            "Examples: `!stats me`, `!stats @user tank`, `!stats Fúriä Lex`"
+            "Roles: `damage`, `flank`, `support`, `tank`, `point tank`, `off tank`.\n"
+            "Filters: `map <name>`, `wins`, `losses`, `team1/team2`, `4-3`, `close`, "
+            "`stomp`, `sweep`, `with <player>`, `against <player>`.\n"
+            "Examples:\n"
+            "- `!stats me`\n"
+            "- `!stats me support`\n"
+            "- `!stats @user moji`\n"
+            "- `!stats pjamo damba wins`\n"
+            "- `!stats me tank map jaguar falls`\n"
+            "- `!stats me support team1`\n"
+            "- `!stats me moji losses 4-3`\n"
+            "- `!stats me tank with pjamo against nozy`"
         ),
     )
     async def stats_cmd(self, ctx, user: PlayerConverter = None, *, filter_str: str = None):
         start_time = time.monotonic()
         target_user = user or ctx.author
+        match_filters = {}
 
         player_id = resolve_player_id(target_user)
         if not player_id:
@@ -60,21 +421,28 @@ class Stats(commands.Cog):
 
         icon_file = None
         embed = discord.Embed(color=discord.Color.blue())
+
+        if filter_str:
+            filter_args, match_filters, filter_error = await _extract_match_filters(ctx, filter_str.split())
+            if filter_error:
+                await ctx.send(filter_error)
+                return
+            filter_str = " ".join(filter_args).strip() or None
         
         # --- Filtered Stats Logic (Champion or Role) ---
         if filter_str:
             filter_lower = filter_str.lower()
             
             # --- ROLE-BASED STATS ---
-            if filter_lower in ROLE_ALIASES:
-                role_name = ROLE_ALIASES[filter_lower]
-                champs_in_role = [champ for champ, r_name in CHAMPION_ROLES.items() if r_name == role_name]
+            role_name = resolve_role_name(filter_lower)
+            if role_name:
+                champs_in_role = get_champions_for_role(role_name)
                 
                 if not champs_in_role:
                     await ctx.send("Internal error: Could not find champions for that role.")
                     return
 
-                role_stats = get_player_stats(player_id, champions=champs_in_role)
+                role_stats = get_player_stats(player_id, champions=champs_in_role, filters=match_filters)
 
                 if not role_stats or role_stats["games"] == 0:
                     await ctx.send(f"No stats found for {target_user.display_name} playing the '{role_name}' role.")
@@ -123,12 +491,12 @@ class Stats(commands.Cog):
                     await ctx.send(f"No stats found for {target_user.display_name} on a champion or role matching '{filter_str}'.")
                     return
                 
-                champ_stats = get_player_stats(player_id, champions=[full_champion_name])
+                champ_stats = get_player_stats(player_id, champions=[full_champion_name], filters=match_filters)
                 if not champ_stats or champ_stats["games"] == 0:
                     await ctx.send(f"No stats found for {target_user.display_name} on {full_champion_name}.")
                     return
 
-                global_stats = get_player_stats(player_id)
+                global_stats = get_player_stats(player_id, filters=match_filters)
 
                 author_icon = _avatar_url(target_user)
                 if author_icon:
@@ -177,7 +545,7 @@ class Stats(commands.Cog):
 
         # --- GENERAL STATS (No Filter) ---
         else:
-            stats = get_player_stats(player_id)
+            stats = get_player_stats(player_id, filters=match_filters)
             if not stats or stats["games"] == 0:
                 await ctx.send(f"No stats found for {target_user.display_name}.")
                 return
@@ -219,6 +587,9 @@ class Stats(commands.Cog):
         # Set the footer
         fetch_time = (time.monotonic() - start_time) * 1000
         footer_text = f"Fetched in {fetch_time:.0f}ms"
+        active_filters = _filter_summary(match_filters)
+        if active_filters:
+            footer_text = f"{footer_text}    •   {'; '.join(active_filters)}"
         if _is_unlinked(target_user):
             footer_text = f"Unlinked IGN: {target_user.display_name}    •   {footer_text}"
         elif not filter_str:
@@ -230,13 +601,14 @@ class Stats(commands.Cog):
     TOP_HELP = """
 Shows champion statistics breakdown for a player.
 
-**Usage:** `!top [@user] [-stat1] [-stat2] ... [role/champion] [-m <games>]`
+**Usage:** `!top [@user] [-stat1] [-stat2] ... [role/champion] [-m <games>] [filters]`
 
 **Arguments:**
 - `[@user]`: Target player (defaults to yourself)
 - `[-stat]`: Stats to display (e.g., `-kpm -dmg_share -kda`)
-- `[role/champion]`: Filter by role or champion name
+- `[role/champion]`: Filter by role (`damage`, `flank`, `support`, `tank`, `point tank`, `off tank`) or champion name
 - `[-m <games>]`: Minimum games filter (default: 1)
+- `[filters]`: `map <name>`, `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `with <player>`, `against <player>`
 
 **Available Stats:**
 - `-wr` or `-winrate`: Winrate percentage
@@ -246,6 +618,7 @@ Shows champion statistics breakdown for a player.
 - `-dmg` or `-damage_pm`: Damage per minute
 - `-taken_pm`: Damage taken per minute
 - `-heal_pm`: Healing per minute
+- `-dhpm` or `-dmg_heal_pm`: Damage + healing per minute
 - `-self_heal_pm`: Self healing per minute
 - `-creds_pm`: Credits per minute
 - `-kp`: Kill participation %
@@ -263,13 +636,26 @@ Shows champion statistics breakdown for a player.
 
 **Examples:**
 - `!top` - Shows default stats (games, winrate, KDA, time)
+- `!top me` - Shows your champion table.
 - `!top -kpm -dmg_share` - Shows kills/min and damage share
 - `!top tank -m 5` - Shows tanks with 5+ games
+- `!top me bk` - Shows your Bomb King stats.
+- `!top me point tank` - Shows your point tanks.
+- `!top me off tank` - Shows your off tanks.
 - `!top @user -wr -kp -dmg support` - Shows support stats with custom columns
+- `!top me -wr -dhpm ying` - Shows Ying winrate and damage+healing/min
+- `!top me -wr -kp support with pjamo` - Shows support stats while teamed with pjamo
+- `!top me damba wins map brightmarsh` - Shows Mal'Damba on Brightmarsh wins
+- `!top me ash team2 close against nozy` - Shows Ash on Team 2 in close games against nozy
 """
 
     @commands.command(name="top", help=TOP_HELP)
     async def top_cmd(self, ctx, *args):
+        args, match_filters, filter_error = await _extract_match_filters(ctx, args)
+        if filter_error:
+            await ctx.send(filter_error)
+            return
+
         # Parse arguments
         target_user = ctx.author
         stat_flags = []
@@ -293,13 +679,18 @@ Shows champion statistics breakdown for a player.
             '-kpm': '-kills_pm',
             '-heal_pm': '-healing_pm',
             '-self_heal_pm': '-self_healing_pm',
-            '-creds_pm': '-credits_pm'
+            '-creds_pm': '-credits_pm',
+            '-dhpm': '-damage_healing_pm',
+            '-dmg_heal_pm': '-damage_healing_pm',
+            '-dmg_healing_pm': '-damage_healing_pm',
+            '-damage_heal_pm': '-damage_healing_pm',
         }
         
         # Valid stat keys
         valid_stats = {
             '-winrate', '-kda', '-kda_ratio', '-kills_pm', '-deaths_pm', 
-            '-damage_pm', '-damage_dealt_pm', '-damage_taken_pm', '-healing_pm', 
+            '-damage_pm', '-damage_dealt_pm', '-damage_taken_pm', '-healing_pm',
+            '-damage_healing_pm',
             '-self_healing_pm', '-credits_pm', '-kp', '-dmg_share',
             '-avg_kills', '-avg_deaths', '-avg_damage_dealt', '-avg_damage_taken',
             '-damage_delta', '-avg_healing', '-avg_self_healing', '-avg_shielding',
@@ -348,20 +739,12 @@ Shows champion statistics breakdown for a player.
             if unprocessed_args:
                 filter_str = " ".join(unprocessed_args).lower()
                 
-                # Check if it's a role
-                valid_roles = {role.lower() for role in CHAMPION_ROLES.values()}
-                role_aliases_map = {'dmg': 'damage'}
-                
-                matched_role = None
-                if filter_str in role_aliases_map:
-                    matched_role = role_aliases_map[filter_str]
-                else:
-                    matched_role = next((role for role in valid_roles if role.startswith(filter_str)), None)
+                matched_role = resolve_role_name(filter_str)
                 
                 if matched_role:
-                    role_filter = matched_role.capitalize()
+                    role_filter = matched_role
                 else:
-                    champion_filter = filter_str
+                    champion_filter = resolve_champion_name(filter_str) or filter_str
         
         # Get player ID
         player_id = resolve_player_id(target_user)
@@ -374,7 +757,9 @@ Shows champion statistics breakdown for a player.
             stat_flags = ['winrate', 'kda_ratio', 'games', 'time_played']
         
         # Get champion stats
-        champ_data = get_player_champion_stats(player_id, role_filter=role_filter, min_games=min_games)
+        champ_data = get_player_champion_stats(
+            player_id, role_filter=role_filter, min_games=min_games, filters=match_filters
+        )
         
         # Filter by champion if specified
         if champion_filter and champ_data:
@@ -418,6 +803,7 @@ Shows champion statistics breakdown for a player.
             filters.append(f"Champion: {champion_filter}")
         if min_games > 1:
             filters.append(f"Min games: {min_games}")
+        filters.extend(_filter_summary(match_filters))
         if filters:
             embed.description = f"*Filters: {', '.join(filters)}*"
         
@@ -431,6 +817,7 @@ Shows champion statistics breakdown for a player.
             'damage_dealt_pm': lambda v: f"{int(v):,}",
             'damage_taken_pm': lambda v: f"{int(v):,}",
             'healing_pm': lambda v: f"{int(v):,}",
+            'damage_healing_pm': lambda v: f"{int(v):,}",
             'self_healing_pm': lambda v: f"{int(v):,}",
             'credits_pm': lambda v: f"{int(v):,}",
             'kp': lambda v: f"{v:.1f}%",
@@ -459,6 +846,7 @@ Shows champion statistics breakdown for a player.
             'damage_dealt_pm': 'DMG/min',
             'damage_taken_pm': 'Taken/min',
             'healing_pm': 'Heal/min',
+            'damage_healing_pm': 'D+H/min',
             'self_healing_pm': 'SHeal/min',
             'credits_pm': 'Creds/min',
             'kp': 'KP%',
@@ -497,8 +885,9 @@ Shows champion statistics breakdown for a player.
         # Add data rows grouped by role
         if not role_filter and not champion_filter:
             # Group by role
-            for role in ["Damage", "Flank", "Tank", "Support"]:
-                role_champs = [c for c in champ_data if CHAMPION_ROLES.get(c["champ"]) == role]
+            for role in ["Damage", "Flank", "Point Tank", "Off Tank", "Support"]:
+                role_champ_names = set(get_champions_for_role(role))
+                role_champs = [c for c in champ_data if c["champ"] in role_champ_names]
                 if role_champs:
                     lines.append(header)
                     lines.append(separator)
@@ -582,7 +971,12 @@ Shows champion statistics breakdown for a player.
         help=(
             "Show recent matches for a player (max 20).\n"
             "Usage: `!history [user|ign] [count]`\n"
-            "Examples: `!history 10`, `!history @user 5`, `!history Fúriä 8`"
+            "Examples:\n"
+            "- `!history`\n"
+            "- `!history 10`\n"
+            "- `!history @user 5`\n"
+            "- `!history pjamo 8`\n"
+            "- `!history Fúriä 20`"
         ),
     )
     async def history_cmd(self, ctx, *args):
@@ -639,14 +1033,15 @@ Shows champion statistics breakdown for a player.
     LEADERBOARD_HELP = """
 Shows player rankings, with optional filters for champions or roles.
 
-**Usage:** `!leaderboard [stat] [champion/role] [limit] [-b] [-m <games>]`
+**Usage:** `!leaderboard [stat] [champion/role] [limit] [-b] [-m <games>] [filters]`
 
 **Arguments:**
 - `[stat]`: The statistic to rank by. Defaults to `winrate`.
-- `[champion/role]`: Filter by a champion name (e.g., `nando`) or a role (`tank`, `support`).
+- `[champion/role]`: Filter by a champion name (e.g., `nando`) or a role (`tank`, `support`, `point tank`, `off tank`).
 - `[limit]`: The number of players to show. Defaults to `20`.
 - `[-b]`: Optional flag to show the bottom of the leaderboard.
 - `[-m <games>]`: Optional flag to set a minimum number of games played to qualify. Defaults to 1 (all players).
+- `[filters]`: `map <name>`, `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `with <player>`, `against <player>`
 
 **Available Stats:**
 - `winrate` (or `wr`): Overall Winrate
@@ -658,6 +1053,7 @@ Shows player rankings, with optional filters for champions or roles.
 - `dmg` (or `dpm`): Damage per Minute
 - `taken_pm`: Damage Taken per Minute
 - `heal_pm`: Healing per Minute (Defaults to Supports)
+- `dhpm`: Damage + Healing per Minute (Defaults to Supports)
 - `self_heal_pm`: Self Healing per Minute
 - `creds_pm`: Credits per Minute
 - `avg_kills`: Average Kills per Match
@@ -676,6 +1072,15 @@ Shows player rankings, with optional filters for champions or roles.
 - `!lb heal_pm tank`: Top 20 healers on Tank champions.
 - `!lb kp tank`: Top 20 tanks by kill participation.
 - `!lb dmg_share dmg`: Top 20 damage dealers by damage share.
+- `!lb wr barik team2`: Barik winrate on Team 2.
+- `!lb kp moji losses`: Moji KP in losses only.
+- `!lb wr support map jaguar falls`: Support winrate on Jaguar Falls.
+- `!lb wr inara 4-3`: Inara winrate in games ending 4-3.
+- `!lb wr ash team2 close against pjamo`: Ash winrate on Team 2 in close games against pjamo.
+- `!lb wr bk wins`: Bomb King winrate in wins only.
+- `!lb dhpm ying`: Ying damage + healing per minute.
+- `!lb wr point tank map jaguar falls`: Point tank winrate on Jaguar Falls.
+- `!map jaguar falls wr support`: Shortcut for support winrate on Jaguar Falls.
 """
 
     @commands.command(name="leaderboard", aliases=["lb"], help=LEADERBOARD_HELP)
@@ -691,6 +1096,10 @@ Shows player rankings, with optional filters for champions or roles.
             "dmg_pm": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
             "taken_pm": ("Damage Taken/Min", "damage_taken_pm", lambda v, s: f"{int(v):,}"),
             "heal_pm": ("Healing/Min", "healing_pm", lambda v, s: f"{int(v):,}"),
+            "dhpm": ("Damage + Healing/Min", "damage_healing_pm", lambda v, s: f"{int(v):,}"),
+            "dmg_heal_pm": ("Damage + Healing/Min", "damage_healing_pm", lambda v, s: f"{int(v):,}"),
+            "dmg_healing_pm": ("Damage + Healing/Min", "damage_healing_pm", lambda v, s: f"{int(v):,}"),
+            "damage_healing_pm": ("Damage + Healing/Min", "damage_healing_pm", lambda v, s: f"{int(v):,}"),
             "self_heal_pm": ("Self Healing/Min", "self_healing_pm", lambda v, s: f"{int(v):,}"),
             "creds_pm": ("Credits/Min", "credits_pm", lambda v, s: f"{int(v):,}"),
             "avg_kills": ("AVG Kills", "avg_kills", lambda v, s: f"{v:.2f}"),
@@ -709,6 +1118,11 @@ Shows player rankings, with optional filters for champions or roles.
             "wr": ("Winrate", "winrate", lambda v, s: f"{v:.2f}% ({s['wins']}-{s['losses']})"),
             "hpm": ("Healing/Min", "healing_pm", lambda v, s: f"{int(v):,}"),
         }
+
+        args, match_filters, filter_error = await _extract_match_filters(ctx, args)
+        if filter_error:
+            await ctx.send(filter_error)
+            return
         
         # --- 1. Argument Parsing ---
         stat_alias = "winrate"
@@ -717,9 +1131,6 @@ Shows player rankings, with optional filters for champions or roles.
         champion_filter = None
         role_filter = None
         min_games = None
-        
-        valid_roles = {role.lower() for role in CHAMPION_ROLES.values()}
-        role_aliases = {'dmg': 'damage'}
         
         unprocessed_args = []
         args = list(args)
@@ -749,16 +1160,12 @@ Shows player rankings, with optional filters for champions or roles.
         if unprocessed_args:
             full_filter_str = " ".join(unprocessed_args).lower()
             
-            matched_role = None
-            if full_filter_str in role_aliases:
-                matched_role = role_aliases[full_filter_str]
-            else:
-                matched_role = next((role for role in valid_roles if role.startswith(full_filter_str)), None)
+            matched_role = resolve_role_name(full_filter_str)
 
             if matched_role:
-                role_filter = matched_role.capitalize()
+                role_filter = matched_role
             else:
-                champion_filter = full_filter_str
+                champion_filter = resolve_champion_name(full_filter_str) or full_filter_str
 
         limit = max(1, min(limit, 50))
         
@@ -767,14 +1174,16 @@ Shows player rankings, with optional filters for champions or roles.
         
         # --- 2. Fetch Data ---
         display_name, data_key, formatter = stat_map[stat_alias]
+        if not champion_filter and not role_filter and data_key in ["healing_pm", "avg_healing", "damage_healing_pm"]:
+            role_filter = "Support"
         leaderboard_data = get_leaderboard(
             data_key, limit, show_bottom,
-            champion=champion_filter, role=role_filter, min_games=min_games
+            champion=champion_filter, role=role_filter, min_games=min_games, filters=match_filters
         )
         if not leaderboard_data:
             filter_name = champion_filter.title() if champion_filter else role_filter if role_filter else ""
             # Add a note if it's a healing stat and no filter was applied
-            if not filter_name and data_key in ["healing_pm", "avg_healing"]:
+            if not filter_name and data_key in ["healing_pm", "avg_healing", "damage_healing_pm"]:
                  filter_name = "Supports"
             filter_msg = f" as {filter_name}" if filter_name else ""
             await ctx.send(f"Could not generate a leaderboard for `{display_name}`{filter_msg}. No qualified player data found.")
@@ -787,13 +1196,20 @@ Shows player rankings, with optional filters for champions or roles.
             filter_text = f" on {full_champ_name.title()}"
         elif role_filter:
             filter_text = f" as {role_filter}"
+        filter_text += _title_filter_suffix(match_filters)
 
         embed_title = f"🏆 {'Bottom' if show_bottom else 'Top'} {len(leaderboard_data)} Players by {display_name}{filter_text}"
         embed_color = 0xE74C3C if show_bottom else 0x2ECC71
         embed = discord.Embed(title=embed_title, color=embed_color)
         
+        footer_parts = []
         if min_games > 1:
-            embed.set_footer(text=f"Players must have at least {min_games} games with the specified filter to qualify.")
+            footer_parts.append(f"Players must have at least {min_games} games with the specified filter to qualify.")
+        active_filters = _filter_summary(match_filters)
+        if active_filters:
+            footer_parts.append("Filters: " + "; ".join(active_filters))
+        if footer_parts:
+            embed.set_footer(text=" • ".join(footer_parts))
 
         description = []
         for i, data_row in enumerate(leaderboard_data):
@@ -810,13 +1226,50 @@ Shows player rankings, with optional filters for champions or roles.
         embed.description = "\n".join(description)
         await ctx.send(embed=embed)
 
+    MAP_HELP = """
+Shortcut leaderboard for one map.
+
+**Usage:** `!map <map name> [stat] [champion/role] [limit] [-b] [-m <games>] [filters]`
+
+This is the same as using `!lb ... map <map name>`.
+
+**Examples:**
+- `!map jaguar falls` - Winrate leaderboard on Jaguar Falls.
+- `!map brightmarsh wr support` - Support winrate on Brightmarsh.
+- `!map stone keep night kp moji` - Moji KP on Stone Keep Night.
+- `!map ascension peak dmg flank 10` - Top 10 flank damage/min on Ascension Peak.
+- `!map serpent beach wr barik team2` - Barik WR on Team 2 on Serpent Beach.
+- `!map jaguar falls wr inara 4-3` - Inara WR in 4-3 games on Jaguar Falls.
+- `!map brightmarsh dhpm ying` - Ying damage + healing/min on Brightmarsh.
+"""
+
+    @commands.command(name="map", aliases=["maplb"], help=MAP_HELP)
+    async def map_cmd(self, ctx, *args):
+        if not args:
+            await ctx.send("Usage: `!map <map name> [stat] [champion/role] [filters]`")
+            return
+
+        resolved_map, remaining_args = _resolve_leading_map(args)
+        if not resolved_map:
+            await ctx.send(f"Could not find a map matching `{' '.join(str(arg) for arg in args)}`.")
+            return
+
+        leaderboard_args = list(remaining_args) + ["map", resolved_map]
+        await self.leaderboard_cmd.callback(self, ctx, *leaderboard_args)
+
     @commands.command(
         name="compare",
         help=(
             "Head-to-head comparison between two players.\n"
             "Usage: `!compare <user1|ign> [user2|ign]`\n"
             "If the second player is omitted, compares against you. Each argument "
-            "accepts mentions, IDs, usernames, main IGNs, or alt IGNs."
+            "accepts mentions, IDs, usernames, main IGNs, or alt IGNs.\n"
+            "Examples:\n"
+            "- `!compare pjamo`\n"
+            "- `!compare @user`\n"
+            "- `!compare pjamo nozy`\n"
+            "- `!compare @user pjamo`\n"
+            "- `!compare lulub DTC`"
         ),
     )
     async def compare_cmd(self, ctx, user1: PlayerConverter, user2: PlayerConverter = None):
@@ -932,14 +1385,15 @@ Shows player rankings, with optional filters for champions or roles.
     CHAMPION_LEADERBOARD_HELP = """
 Shows champion rankings aggregated across all players.
 
-**Usage:** `!champ_lb [stat] [role] [limit] [-b] [-m <games>]`
+**Usage:** `!champ_lb [stat] [role] [limit] [-b] [-m <games>] [filters]`
 
 **Arguments:**
 - `[stat]`: The statistic to rank by. Defaults to `winrate`.
-- `[role]`: Filter by a role (`damage`, `flank`, `tank`, `support`).
+- `[role]`: Filter by a role (`damage`, `flank`, `tank`, `support`, `point tank`, `off tank`).
 - `[limit]`: The number of champions to show. Defaults to `20`.
 - `[-b]`: Optional flag to show the bottom of the leaderboard.
 - `[-m <games>]`: Optional flag to set a minimum number of games to qualify. Defaults to 1.
+- `[filters]`: `map <name>`, `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `with <player>`, `against <player>`
 
 **Available Stats:**
 - `winrate` (or `wr`): Overall Winrate
@@ -951,6 +1405,7 @@ Shows champion rankings aggregated across all players.
 - `dmg` (or `dpm`): Damage per Minute
 - `taken_pm`: Damage Taken per Minute
 - `heal_pm`: Healing per Minute
+- `dhpm`: Damage + Healing per Minute
 - `self_heal_pm`: Self Healing per Minute
 - `creds_pm`: Credits per Minute
 - `avg_kills`: Average Kills per Match
@@ -965,10 +1420,18 @@ Shows champion rankings aggregated across all players.
 - `obj_time`: Average Objective Time per Match
 
 **Examples:**
+- `!clb`: Top champions by winrate.
 - `!clb dmg`: Top 20 champions by damage per minute.
 - `!clb winrate tank`: Top 20 tanks by winrate.
+- `!clb winrate point tank`: Top point tanks by winrate.
 - `!clb kp -m 50`: Top champions by kill participation (min 50 games).
 - `!clb deaths_pm -b`: Bottom 20 champions by deaths per minute.
+- `!clb wr support team1 map stone keep night`: Support champion winrate on Team 1 for Stone Keep Night.
+- `!clb kp close`: Champion KP in close games only.
+- `!clb wr flank losses`: Flank champion winrate in losses only.
+- `!clb dmg damage team2 stomp`: Damage champion damage/min on Team 2 in stomps.
+- `!clb wr support against nozy`: Support champion winrate against nozy.
+- `!clb dhpm support`: Support champion damage + healing per minute.
 """
 
     @commands.command(name="champ_lb", aliases=["clb", "champleaderboard"], help=CHAMPION_LEADERBOARD_HELP)
@@ -984,6 +1447,10 @@ Shows champion rankings aggregated across all players.
             "dmg_pm": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
             "taken_pm": ("Damage Taken/Min", "damage_taken_pm", lambda v, s: f"{int(v):,}"),
             "heal_pm": ("Healing/Min", "healing_pm", lambda v, s: f"{int(v):,}"),
+            "dhpm": ("Damage + Healing/Min", "damage_healing_pm", lambda v, s: f"{int(v):,}"),
+            "dmg_heal_pm": ("Damage + Healing/Min", "damage_healing_pm", lambda v, s: f"{int(v):,}"),
+            "dmg_healing_pm": ("Damage + Healing/Min", "damage_healing_pm", lambda v, s: f"{int(v):,}"),
+            "damage_healing_pm": ("Damage + Healing/Min", "damage_healing_pm", lambda v, s: f"{int(v):,}"),
             "self_heal_pm": ("Self Healing/Min", "self_healing_pm", lambda v, s: f"{int(v):,}"),
             "creds_pm": ("Credits/Min", "credits_pm", lambda v, s: f"{int(v):,}"),
             "avg_kills": ("AVG Kills", "avg_kills", lambda v, s: f"{v:.2f}"),
@@ -1002,6 +1469,11 @@ Shows champion rankings aggregated across all players.
             "wr": ("Winrate", "winrate", lambda v, s: f"{v:.2f}% ({s['wins']}-{s['losses']})"),
             "hpm": ("Healing/Min", "healing_pm", lambda v, s: f"{int(v):,}"),
         }
+
+        args, match_filters, filter_error = await _extract_match_filters(ctx, args)
+        if filter_error:
+            await ctx.send(filter_error)
+            return
         
         # --- 1. Argument Parsing ---
         stat_alias = "winrate"
@@ -1009,9 +1481,6 @@ Shows champion rankings aggregated across all players.
         show_bottom = False
         role_filter = None
         min_games = None
-        
-        valid_roles = {role.lower() for role in CHAMPION_ROLES.values()}
-        role_aliases = {'dmg': 'damage'}
         
         unprocessed_args = []
         args = list(args)
@@ -1042,14 +1511,10 @@ Shows champion rankings aggregated across all players.
         if unprocessed_args:
             full_filter_str = " ".join(unprocessed_args).lower()
             
-            matched_role = None
-            if full_filter_str in role_aliases:
-                matched_role = role_aliases[full_filter_str]
-            else:
-                matched_role = next((role for role in valid_roles if role.startswith(full_filter_str)), None)
+            matched_role = resolve_role_name(full_filter_str)
 
             if matched_role:
-                role_filter = matched_role.capitalize()
+                role_filter = matched_role
 
         limit = max(1, min(limit, 50))
         
@@ -1060,7 +1525,7 @@ Shows champion rankings aggregated across all players.
         display_name, data_key, formatter = stat_map[stat_alias]
         leaderboard_data = get_champion_leaderboard(
             data_key, limit, show_bottom,
-            role=role_filter, min_games=min_games
+            role=role_filter, min_games=min_games, filters=match_filters
         )
         
         if not leaderboard_data:
@@ -1070,13 +1535,20 @@ Shows champion rankings aggregated across all players.
 
         # --- 3. Build Embed ---
         filter_text = f" ({role_filter})" if role_filter else ""
+        filter_text += _title_filter_suffix(match_filters)
         
         embed_title = f"🏆 {'Bottom' if show_bottom else 'Top'} {len(leaderboard_data)} Champions by {display_name}{filter_text}"
         embed_color = 0xE74C3C if show_bottom else 0x2ECC71
         embed = discord.Embed(title=embed_title, color=embed_color)
         
+        footer_parts = []
         if min_games > 1:
-            embed.set_footer(text=f"Champions must have at least {min_games} games played to qualify.")
+            footer_parts.append(f"Champions must have at least {min_games} games played to qualify.")
+        active_filters = _filter_summary(match_filters)
+        if active_filters:
+            footer_parts.append("Filters: " + "; ".join(active_filters))
+        if footer_parts:
+            embed.set_footer(text=" • ".join(footer_parts))
 
         description = []
         for i, data_row in enumerate(leaderboard_data):

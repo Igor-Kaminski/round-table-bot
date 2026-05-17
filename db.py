@@ -3,6 +3,12 @@ import re
 import sqlite3
 import unicodedata
 
+from core.constants import CHAMPION_ROLES, get_champions_for_role, resolve_champion_name
+
+CHAMPION_NAME_FIXES = {
+    "Ghrok": "Grohk",
+}
+
 
 def _norm(value):
     """Return the NFC form of a string, trimmed of surrounding whitespace.
@@ -20,6 +26,94 @@ def _norm_lower(value):
     """NFC-normalised, lower-cased key for case-insensitive equality checks."""
     norm = _norm(value)
     return norm.lower() if norm is not None else ""
+
+
+def _strip_wrapping_quotes(value):
+    value = _norm(value)
+    if not value:
+        return value
+    while len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
+        value = value[1:-1].strip()
+    return value
+
+
+def _normalize_champion_name(champ):
+    champ = _strip_wrapping_quotes(champ)
+    return CHAMPION_NAME_FIXES.get(champ, champ)
+
+
+def _team_score_expr(player_alias):
+    return f"CASE WHEN {player_alias}.team = 1 THEN m.team1_score ELSE m.team2_score END"
+
+
+def _opponent_score_expr(player_alias):
+    return f"CASE WHEN {player_alias}.team = 1 THEN m.team2_score ELSE m.team1_score END"
+
+
+def _win_condition(player_alias):
+    return (
+        f"(({player_alias}.team = 1 AND m.team1_score > m.team2_score) "
+        f"OR ({player_alias}.team = 2 AND m.team2_score > m.team1_score))"
+    )
+
+
+def _apply_match_filters(where_conditions, params, filters=None, player_alias="ps"):
+    if not filters:
+        return
+
+    if filters.get("map"):
+        where_conditions.append("m.map = ?")
+        params.append(filters["map"])
+
+    if filters.get("result") == "wins":
+        where_conditions.append(_win_condition(player_alias))
+    elif filters.get("result") == "losses":
+        where_conditions.append(f"NOT {_win_condition(player_alias)}")
+
+    if filters.get("team"):
+        where_conditions.append(f"{player_alias}.team = ?")
+        params.append(filters["team"])
+
+    if filters.get("scoreline"):
+        team_score, opponent_score = filters["scoreline"]
+        where_conditions.append(
+            f"{_team_score_expr(player_alias)} = ? AND {_opponent_score_expr(player_alias)} = ?"
+        )
+        params.extend([team_score, opponent_score])
+    elif filters.get("score_category") == "close":
+        where_conditions.append(
+            "((m.team1_score = 4 AND m.team2_score = 3) OR (m.team1_score = 3 AND m.team2_score = 4))"
+        )
+    elif filters.get("score_category") == "stomp":
+        where_conditions.append("ABS(m.team1_score - m.team2_score) >= 3")
+    elif filters.get("score_category") == "sweep":
+        where_conditions.append("ABS(m.team1_score - m.team2_score) = 4")
+
+    if filters.get("with_player_id"):
+        where_conditions.append(
+            f"""
+            EXISTS (
+                SELECT 1 FROM player_stats teammate_ps
+                WHERE teammate_ps.match_id = {player_alias}.match_id
+                  AND teammate_ps.player_id = ?
+                  AND teammate_ps.team = {player_alias}.team
+            )
+            """
+        )
+        params.append(filters["with_player_id"])
+
+    if filters.get("against_player_id"):
+        where_conditions.append(
+            f"""
+            EXISTS (
+                SELECT 1 FROM player_stats opponent_ps
+                WHERE opponent_ps.match_id = {player_alias}.match_id
+                  AND opponent_ps.player_id = ?
+                  AND opponent_ps.team != {player_alias}.team
+            )
+            """
+        )
+        params.append(filters["against_player_id"])
 
 
 def _find_player_row_by_ign(cursor, ign):
@@ -106,15 +200,24 @@ def create_database():
 
     cursor.execute("PRAGMA table_info(player_stats);")
     columns = [row[1] for row in cursor.fetchall()]
+    needs_team_migration = False
     if "team" not in columns:
         print("Adding 'team' column to player_stats table...")
         cursor.execute("ALTER TABLE player_stats ADD COLUMN team INTEGER;")
         conn.commit()
-        migrate_team_column()
+        needs_team_migration = True
+    else:
+        cursor.execute(
+            "SELECT 1 FROM player_stats WHERE team IS NULL OR team NOT IN (1, 2) LIMIT 1;"
+        )
+        needs_team_migration = cursor.fetchone() is not None
 
     _migrate_normalize_igns(cursor)
+    _migrate_normalize_champions(cursor)
     conn.commit()
     conn.close()
+    if needs_team_migration:
+        migrate_team_column()
 
 
 def _migrate_normalize_igns(cursor):
@@ -162,6 +265,21 @@ def _migrate_normalize_igns(cursor):
         print(f"Migration _migrate_normalize_igns failed: {e}")
 
 
+def _migrate_normalize_champions(cursor):
+    """Clean stored champion names so role filters see the same names as constants."""
+    try:
+        cursor.execute("SELECT DISTINCT champ FROM player_stats;")
+        for (champ,) in cursor.fetchall():
+            normalized = _normalize_champion_name(champ)
+            if champ != normalized:
+                cursor.execute(
+                    "UPDATE player_stats SET champ = ? WHERE champ = ?;",
+                    (normalized, champ),
+                )
+    except sqlite3.Error as e:
+        print(f"Migration _migrate_normalize_champions failed: {e}")
+
+
 def insert_scoreboard(scoreboard, queue_num):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
@@ -189,7 +307,7 @@ def insert_scoreboard(scoreboard, queue_num):
 
         for player in players:
             ign = _norm(player["name"])
-            champ = player["champ"]
+            champ = _normalize_champion_name(player["champ"])
             talent = player["talent"]
             credits = player["credits"]
             kills = player["kills"]
@@ -462,6 +580,37 @@ def queue_exists(queue_num):
         conn.close()
 
 
+def resolve_map_name(partial_name):
+    def map_key(value):
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", _norm_lower(value)).split())
+
+    needle = map_key(partial_name)
+    if not needle:
+        return None
+
+    conn = sqlite3.connect("match_data.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute("SELECT DISTINCT map FROM matches WHERE map IS NOT NULL;")
+        maps = [row[0] for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+    for map_name in maps:
+        if map_key(map_name) == needle:
+            return map_name
+
+    matches = [map_name for map_name in maps if needle in map_key(map_name)]
+    if len(matches) == 1:
+        return matches[0]
+
+    starts = [map_name for map_name in maps if map_key(map_name).startswith(needle)]
+    if len(starts) == 1:
+        return starts[0]
+
+    return None
+
+
 def get_registered_igns(ign_list):
     """Return ``(registered, not_registered)`` split of the supplied IGN list.
 
@@ -701,7 +850,7 @@ def get_player_id(discord_id):
     return result[0] if result else None
 
 
-def get_player_stats(player_id, champions=None):
+def get_player_stats(player_id, champions=None, filters=None):
     """
     Fetches aggregated player stats, now including Kill Participation and Damage Share.
     If no champion/role filter is provided, 'healing' stats are calculated
@@ -712,12 +861,23 @@ def get_player_stats(player_id, champions=None):
     cursor = conn.cursor()
     
     try:
-        query = """
+        where_conditions = ["ps.player_id = ?"]
+        params = [player_id]
+
+        if champions and isinstance(champions, list):
+            placeholders = ', '.join('?' for _ in champions)
+            where_conditions.append(f"ps.champ IN ({placeholders})")
+            params.extend(champions)
+
+        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+        where_clause = " AND ".join(where_conditions)
+
+        query = f"""
             WITH TeamTotals AS (
                 SELECT
                     match_id,
                     team,
-                    SUM(kills) AS team_kills,
+                    SUM(kills + assists) AS team_kill_participations,
                     SUM(damage) AS team_damage
                 FROM player_stats
                 GROUP BY match_id, team
@@ -737,22 +897,14 @@ def get_player_stats(player_id, champions=None):
                 SUM(m.time) AS total_time_in_minutes,
                 SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) AS total_wins,
                 
-                -- MODIFIED: Kill Participation now includes assists
-                AVG(CASE WHEN tt.team_kills > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kills ELSE 0 END) AS avg_kill_share,
+                AVG(CASE WHEN tt.team_kill_participations > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kill_participations ELSE 0 END) AS avg_kill_share,
                 AVG(CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END) AS avg_damage_share
 
             FROM player_stats ps
             JOIN matches m ON ps.match_id = m.match_id
             JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
-            WHERE ps.player_id = ?
+            WHERE {where_clause}
         """
-        
-        params = [player_id]
-        
-        if champions and isinstance(champions, list):
-            placeholders = ', '.join('?' for _ in champions)
-            query += f" AND ps.champ IN ({placeholders})"
-            params.extend(champions)
 
         cursor.execute(query, params)
         data = cursor.fetchone()
@@ -798,11 +950,15 @@ def get_player_stats(player_id, champions=None):
         if not champions:
             support_champs = [champ for champ, role in CHAMPION_ROLES.items() if role == "Support"]
             placeholders = ', '.join('?' for _ in support_champs)
+            healing_conditions = [f"ps.player_id = ?", f"ps.champ IN ({placeholders})"]
+            healing_params = [player_id] + support_champs
+            _apply_match_filters(healing_conditions, healing_params, filters, player_alias="ps")
+            healing_where_clause = " AND ".join(healing_conditions)
             cursor.execute(f"""
                 SELECT SUM(ps.healing), SUM(m.time), COUNT(ps.match_id)
                 FROM player_stats ps JOIN matches m ON ps.match_id = m.match_id
-                WHERE ps.player_id = ? AND ps.champ IN ({placeholders})
-            """, [player_id] + support_champs)
+                WHERE {healing_where_clause}
+            """, healing_params)
             healing_row = cursor.fetchone()
             total_healing = healing_row[0] or 0
             support_time = healing_row[1] or 0
@@ -810,6 +966,7 @@ def get_player_stats(player_id, champions=None):
             
         stats_dict["healing_pm"] = round(total_healing / max(1, support_time), 2)
         stats_dict["avg_healing"] = round(total_healing / max(1, support_games))
+        stats_dict["damage_healing_pm"] = round(stats_dict["damage_dealt_pm"] + stats_dict["healing_pm"], 2)
 
         return stats_dict
     finally:
@@ -941,25 +1098,7 @@ def get_match_history(player_id, limit: int = 30):
     finally:
         conn.close()
 
-CHAMPION_ROLES = {
-    "Bomb King": "Damage", "Cassie": "Damage", "Dredge": "Damage", "Drogoz": "Damage",
-    "Imani": "Damage", "Kinessa": "Damage", "Lian": "Damage", "Octavia": "Damage",
-    "Saati": "Damage", "Sha Lin": "Damage", "Strix": "Damage", "Tiberius": "Damage",
-    "Tyra": "Damage", "Viktor": "Damage", "Willo": "Damage", "Betty la Bomba": "Damage",
-    "Omen": "Damage",
-    "Androxus": "Flank", "Buck": "Flank", "Caspian": "Flank", "Evie": "Flank",
-    "Koga": "Flank", "Lex": "Flank", "Maeve": "Flank", "Moji": "Flank",
-    "Skye": "Flank", "Talus": "Flank", "Vatu": "Flank", "Vora": "Flank",
-    "VII": "Flank", "Zhin": "Flank",
-    "Ash": "Tank", "Atlas": "Tank", "Azaan": "Tank", "Barik": "Tank", "Fernando": "Tank",
-    "Inara": "Tank", "Khan": "Tank", "Makoa": "Tank", "Raum": "Tank", "Ruckus": "Tank",
-    "Terminus": "Tank", "Torvald": "Tank", "Yagorath": "Tank", "Nyx": "Tank",
-    "Corvus": "Support", "Furia": "Support", "Ghrok": "Support", "Grover": "Support",
-    "Io": "Support", "Jenos": "Support", "Lillith": "Support", "Mal'Damba": "Support",
-    "Pip": "Support", "Rei": "Support", "Seris": "Support", "Ying": "Support",
-}
-
-def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None, min_games=1):
+def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None, min_games=1, filters=None):
     stat_expressions = {
         "winrate": "SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) * 100.0 / COUNT(ps.match_id)",
         "kda": "CAST(SUM(ps.kills) + SUM(ps.assists) AS REAL) / MAX(1, SUM(ps.deaths))",
@@ -968,6 +1107,7 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
         "damage_dealt_pm": "SUM(CAST(ps.damage AS REAL)) / SUM(m.time)",
         "damage_taken_pm": "SUM(CAST(ps.taken AS REAL)) / SUM(m.time)",
         "healing_pm": "SUM(CAST(ps.healing AS REAL)) / SUM(m.time)",
+        "damage_healing_pm": "SUM(CAST(ps.damage + ps.healing AS REAL)) / SUM(m.time)",
         "self_healing_pm": "SUM(CAST(ps.self_healing AS REAL)) / SUM(m.time)",
         "credits_pm": "SUM(CAST(ps.credits AS REAL)) / SUM(m.time)",
         "avg_kills": "AVG(ps.kills)",
@@ -990,36 +1130,42 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
     order = "ASC" if show_bottom else "DESC"
     params = []
     where_conditions = ["p.discord_id IS NOT NULL", "m.time > 0"]
-    healing_only_stats = ["healing_pm", "avg_healing"]
+    healing_only_stats = ["healing_pm", "avg_healing", "damage_healing_pm"]
 
     if champion:
+        champion = resolve_champion_name(champion) or champion
         where_conditions.append("ps.champ LIKE ?")
         params.append(f"%{champion}%")
     elif role:
-        champions_in_role = [c for c, r in CHAMPION_ROLES.items() if r == role]
+        champions_in_role = get_champions_for_role(role)
         if not champions_in_role: return None
         placeholders = ', '.join('?' for _ in champions_in_role)
         where_conditions.append(f"ps.champ IN ({placeholders})")
         params.extend(champions_in_role)
     elif stat_key in healing_only_stats:
-        champions_in_role = [c for c, r in CHAMPION_ROLES.items() if r == "Support"]
+        champions_in_role = get_champions_for_role("Support")
         placeholders = ', '.join('?' for _ in champions_in_role)
         where_conditions.append(f"ps.champ IN ({placeholders})")
         params.extend(champions_in_role)
+
+    _apply_match_filters(where_conditions, params, filters, player_alias="ps")
 
     where_clause = " AND ".join(where_conditions)
     final_params = params + [min_games, limit]
 
     query = f"""
         WITH TeamTotals AS (
-            SELECT match_id, team, SUM(kills) as team_kills, SUM(damage) as team_damage
+            SELECT
+                match_id,
+                team,
+                SUM(kills + assists) as team_kill_participations,
+                SUM(damage) as team_damage
             FROM player_stats GROUP BY match_id, team
         ),
         MatchShares AS (
             SELECT 
                 ps.*,
-                -- MODIFIED: Kill Participation now includes assists
-                CASE WHEN tt.team_kills > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kills ELSE 0 END as kill_share,
+                CASE WHEN tt.team_kill_participations > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kill_participations ELSE 0 END as kill_share,
                 CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END as damage_share
             FROM player_stats ps
             JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
@@ -1096,15 +1242,30 @@ def migrate_team_column():
         columns = [row[1] for row in cursor.fetchall()]
         if "team" not in columns: return
 
-        cursor.execute("SELECT match_id FROM matches;")
+        cursor.execute(
+            """
+            SELECT DISTINCT match_id
+            FROM player_stats
+            WHERE team IS NULL OR team NOT IN (1, 2);
+            """
+        )
         match_ids = [row[0] for row in cursor.fetchall()]
         for match_id in match_ids:
             cursor.execute(
-                "SELECT player_stats_id FROM player_stats WHERE match_id = ? ORDER BY player_stats_id ASC;",
+                """
+                SELECT
+                    player_stats_id,
+                    CASE WHEN team IS NULL OR team NOT IN (1, 2) THEN 1 ELSE 0 END as needs_team
+                FROM player_stats
+                WHERE match_id = ?
+                ORDER BY player_stats_id ASC;
+                """,
                 (match_id,),
             )
-            ids = [row[0] for row in cursor.fetchall()]
-            for idx, ps_id in enumerate(ids):
+            rows = cursor.fetchall()
+            for idx, (ps_id, needs_team) in enumerate(rows):
+                if not needs_team:
+                    continue
                 team = 1 if idx < 5 else 2
                 cursor.execute(
                     "UPDATE player_stats SET team = ? WHERE player_stats_id = ?;",
@@ -1151,8 +1312,19 @@ def get_discord_id_for_ign(ign):
 
 
 def get_champion_name(player_id, partial_name):
+    resolved_name = resolve_champion_name(partial_name)
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
+    if resolved_name:
+        cursor.execute(
+            "SELECT DISTINCT champ FROM player_stats WHERE player_id = ? AND champ = ? LIMIT 1;",
+            (player_id, resolved_name)
+        )
+        result = cursor.fetchone()
+        if result:
+            conn.close()
+            return result[0]
+
     cursor.execute(
         "SELECT DISTINCT champ FROM player_stats WHERE player_id = ? AND champ LIKE ? LIMIT 1;",
         (player_id, f"%{partial_name}%")
@@ -1198,7 +1370,7 @@ def get_all_champion_stats(player_id):
     return champs
 
 
-def get_player_champion_stats(player_id, role_filter=None, min_games=1):
+def get_player_champion_stats(player_id, role_filter=None, min_games=1, filters=None):
     """
     Gets comprehensive stats for all champions played by a player.
     Returns a list of champion stats with all available metrics.
@@ -1214,7 +1386,7 @@ def get_player_champion_stats(player_id, role_filter=None, min_games=1):
         
         # Apply role filter if specified
         if role_filter:
-            champions_in_role = [c for c, r in CHAMPION_ROLES.items() if r == role_filter]
+            champions_in_role = get_champions_for_role(role_filter)
             if not champions_in_role:
                 return []
             placeholders = ', '.join('?' for _ in champions_in_role)
@@ -1222,16 +1394,23 @@ def get_player_champion_stats(player_id, role_filter=None, min_games=1):
             params.extend(champions_in_role)
         
         where_clause = " AND ".join(where_conditions)
+        match_conditions = ["m.time > 0"]
+        _apply_match_filters(match_conditions, params, filters, player_alias="pms")
+        match_where_clause = " AND ".join(match_conditions)
         
         query = f"""
             WITH TeamTotals AS (
-                SELECT match_id, team, SUM(kills) as team_kills, SUM(damage) as team_damage
+                SELECT
+                    match_id,
+                    team,
+                    SUM(kills + assists) as team_kill_participations,
+                    SUM(damage) as team_damage
                 FROM player_stats GROUP BY match_id, team
             ),
             PlayerMatchShares AS (
                 SELECT 
                     ps.*,
-                    CASE WHEN tt.team_kills > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kills ELSE 0 END as kill_share,
+                    CASE WHEN tt.team_kill_participations > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kill_participations ELSE 0 END as kill_share,
                     CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END as damage_share
                 FROM player_stats ps
                 JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
@@ -1268,7 +1447,7 @@ def get_player_champion_stats(player_id, role_filter=None, min_games=1):
                 
             FROM PlayerMatchShares pms
             JOIN matches m ON pms.match_id = m.match_id
-            WHERE m.time > 0
+            WHERE {match_where_clause}
             GROUP BY pms.champ
             HAVING games >= ?
         """
@@ -1298,6 +1477,7 @@ def get_player_champion_stats(player_id, role_filter=None, min_games=1):
                 "damage_dealt_pm": round(champ_data['total_damage'] / total_minutes, 2),
                 "damage_taken_pm": round(champ_data['total_taken'] / total_minutes, 2),
                 "healing_pm": round(champ_data['total_healing'] / total_minutes, 2),
+                "damage_healing_pm": round((champ_data['total_damage'] + champ_data['total_healing']) / total_minutes, 2),
                 "self_healing_pm": round(champ_data['total_self_healing'] / total_minutes, 2),
                 "credits_pm": round(champ_data['total_credits'] / total_minutes, 2),
                 "avg_kills": round(champ_data['avg_kills'], 2),
@@ -1346,7 +1526,7 @@ def delete_match(match_id):
         conn.close()
 
 
-def get_champion_leaderboard(stat_key, limit, show_bottom=False, role=None, min_games=1):
+def get_champion_leaderboard(stat_key, limit, show_bottom=False, role=None, min_games=1, filters=None):
     """
     Gets leaderboard of champions (not players) aggregated across all games.
     Shows which champions have the best stats overall.
@@ -1360,6 +1540,7 @@ def get_champion_leaderboard(stat_key, limit, show_bottom=False, role=None, min_
         "damage_dealt_pm": "SUM(CAST(ms.damage AS REAL)) / SUM(m.time)",
         "damage_taken_pm": "SUM(CAST(ms.taken AS REAL)) / SUM(m.time)",
         "healing_pm": "SUM(CAST(ms.healing AS REAL)) / SUM(m.time)",
+        "damage_healing_pm": "SUM(CAST(ms.damage + ms.healing AS REAL)) / SUM(m.time)",
         "self_healing_pm": "SUM(CAST(ms.self_healing AS REAL)) / SUM(m.time)",
         "credits_pm": "SUM(CAST(ms.credits AS REAL)) / SUM(m.time)",
         "avg_kills": "AVG(ms.kills)",
@@ -1386,7 +1567,7 @@ def get_champion_leaderboard(stat_key, limit, show_bottom=False, role=None, min_
     where_conditions = ["m.time > 0"] 
     
     if role:
-        champions_in_role = [c for c, r in CHAMPION_ROLES.items() if r == role]
+        champions_in_role = get_champions_for_role(role)
         if not champions_in_role:
             return None
         placeholders = ', '.join('?' for _ in champions_in_role)
@@ -1394,18 +1575,24 @@ def get_champion_leaderboard(stat_key, limit, show_bottom=False, role=None, min_
         where_conditions.append(f"ms.champ IN ({placeholders})")
         params.extend(champions_in_role)
 
+    _apply_match_filters(where_conditions, params, filters, player_alias="ms")
+
     where_clause = " AND ".join(where_conditions)
     final_params = params + [min_games, limit]
 
     query = f"""
         WITH TeamTotals AS (
-            SELECT match_id, team, SUM(kills) as team_kills, SUM(damage) as team_damage
+            SELECT
+                match_id,
+                team,
+                SUM(kills + assists) as team_kill_participations,
+                SUM(damage) as team_damage
             FROM player_stats GROUP BY match_id, team
         ),
         MatchShares AS (
             SELECT 
                 ps.*,
-                CASE WHEN tt.team_kills > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kills ELSE 0 END as kill_share,
+                CASE WHEN tt.team_kill_participations > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kill_participations ELSE 0 END as kill_share,
                 CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END as damage_share
             FROM player_stats ps
             JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team

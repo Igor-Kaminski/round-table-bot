@@ -97,7 +97,7 @@ def parse_match_textbox(text):
 class Listeners(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.reader = easyocr.Reader(['en'])
+        self.reader = None
 
     async def scoreboard_ingestion(self, message):
         # --- FULLY AUTOMATED SCOREBOARD INGESTION ---
@@ -179,6 +179,8 @@ class Listeners(commands.Cog):
 
     def get_match_id(self, img):
         # --- (HELPER) OCR IMAGE PROCESSING ---
+        if self.reader is None:
+            self.reader = easyocr.Reader(['en'])
 
         # Read and store text from the image
         results = self.reader.readtext(img)
