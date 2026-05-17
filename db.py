@@ -1102,7 +1102,15 @@ def get_match_history(player_id, limit: int = 30):
 
 def _get_all_map_names(cursor):
     cursor.execute("SELECT DISTINCT map FROM matches WHERE map IS NOT NULL AND TRIM(map) != '' ORDER BY map ASC;")
-    return [row[0] for row in cursor.fetchall()]
+    return sorted({_display_map_name(row[0]) for row in cursor.fetchall()}, key=str.lower)
+
+
+def _display_map_name(map_name):
+    if map_name in {"Stone Keep (Day)", "Stone Keep (Night)"}:
+        return "Stone Keep"
+    if map_name in {"Serpent Beach", "Serpent Beach V2"}:
+        return "Serpent Beach"
+    return map_name
 
 
 def _map_winrate_rows(cursor, query, params, min_games=1, include_all_maps=True, sort_by_winrate=False):
@@ -1110,15 +1118,14 @@ def _map_winrate_rows(cursor, query, params, min_games=1, include_all_maps=True,
     cursor.execute(query, params + [min_games])
     rows_by_map = {}
     for row in cursor.fetchall():
+        map_name = _display_map_name(row["map"])
         wins = row["wins"] or 0
         games = row["games"] or 0
-        rows_by_map[row["map"]] = {
-            "map": row["map"],
-            "games": games,
-            "wins": wins,
-            "losses": games - wins,
-            "winrate": round((wins / games) * 100, 2) if games else 0,
-        }
+        existing = rows_by_map.setdefault(map_name, {"map": map_name, "games": 0, "wins": 0, "losses": 0, "winrate": 0})
+        existing["games"] += games
+        existing["wins"] += wins
+        existing["losses"] = existing["games"] - existing["wins"]
+        existing["winrate"] = round((existing["wins"] / existing["games"]) * 100, 2) if existing["games"] else 0
 
     if include_all_maps:
         for map_name in all_maps:

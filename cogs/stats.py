@@ -1174,6 +1174,12 @@ Show a player's winrate on every map, with optional role/champion filters.
         title += _title_filter_suffix(match_filters)
 
         embed = discord.Embed(title=title, color=discord.Color.blue())
+        icon_file = None
+        if champions and len(champions) == 1:
+            champ_icon = get_champion_icon_path(champions[0])
+            if os.path.exists(champ_icon):
+                icon_file = discord.File(champ_icon, filename="champ_icon.png")
+                embed.set_thumbnail(url="attachment://champ_icon.png")
         rows = rows[:35]
         name_width = min(24, max(len(row["map"]) for row in rows))
         header = f"{'Map':<{name_width}}  {'Record':<7} {'WR':>7}"
@@ -1198,7 +1204,7 @@ Show a player's winrate on every map, with optional role/champion filters.
             footer_parts.append("Filters: " + "; ".join(active_filters))
         if footer_parts:
             embed.set_footer(text=" • ".join(footer_parts))
-        await ctx.send(embed=embed)
+        await ctx.send(embed=embed, file=icon_file)
 
     CHAMPION_MAP_WINRATES_HELP = """
 Show one champion's winrate on every map.
