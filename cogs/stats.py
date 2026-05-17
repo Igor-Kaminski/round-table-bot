@@ -341,6 +341,7 @@ class Stats(commands.Cog):
                 "`!mapwr me barik team2` - Your Barik map WR on Team 2.",
                 "`!mapwr Eagle moji losses` - Eagle's Moji map records in losses only.",
                 "`!mapwr Eagle inara 4-3` - Eagle's Inara map WR in 4-3 games.",
+                "`!mapwr Eagle -wr` - Eagle's map WR sorted by winrate.",
             ],
             "champmapwr": [
                 "`!champmapwr atlas` - Atlas winrate on every map.",
@@ -353,6 +354,7 @@ class Stats(commands.Cog):
                 "`!champmapwr khan against nozy` - Khan map WR against nozy.",
                 "`!champmapwr atlas -m 5` - Atlas map WR, maps with 5+ games only.",
                 "`!cmapwr ying losses` - Ying map records in losses only.",
+                "`!champmapwr khan -wr` - Khan map WR sorted by winrate.",
             ],
             "filters": [
                 "`team1` / `team2` - Filter by draft side, e.g. `!lb wr barik team2`.",
@@ -1075,7 +1077,7 @@ Shows champion statistics breakdown for a player.
     MAP_WINRATES_HELP = """
 Show a player's winrate on every map, with optional role/champion filters.
 
-**Usage:** `!mapwr [user|ign] [champion|role] [-m <games>] [filters]`
+**Usage:** `!mapwr [user|ign] [champion|role] [-m <games>] [-wr] [filters]`
 
 **Roles:** `damage`, `flank`, `support`, `tank`, `point tank`, `off tank`
 **Filters:** `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `with <player>`, `against <player>`
@@ -1088,6 +1090,7 @@ Show a player's winrate on every map, with optional role/champion filters.
 - `!mapwr Eagle point tank` - Eagle's point tank map winrates.
 - `!mapwr me barik team2` - Your Barik map winrates on Team 2.
 - `!mapwr Eagle inara 4-3` - Eagle's Inara map winrates in 4-3 games.
+- `!mapwr Eagle -wr` - Sort by winrate instead of alphabetically.
 """
 
     @commands.command(name="mapwr", aliases=["map_wr", "maps", "mapstats"], help=MAP_WINRATES_HELP)
@@ -1100,11 +1103,16 @@ Show a player's winrate on every map, with optional role/champion filters.
         target_user = ctx.author
         filter_args = list(args)
         min_games = 1
+        sort_by_winrate = False
 
         i = 0
         cleaned_args = []
         while i < len(filter_args):
             arg = str(filter_args[i])
+            if arg.lower() in {"-wr", "--wr", "-winrate", "--winrate"}:
+                sort_by_winrate = True
+                i += 1
+                continue
             if arg.lower() == "-m":
                 if i + 1 < len(filter_args) and str(filter_args[i + 1]).isdigit():
                     min_games = max(1, int(filter_args[i + 1]))
@@ -1147,7 +1155,14 @@ Show a player's winrate on every map, with optional role/champion filters.
                 champions = [champion_name]
                 filter_name = champion_name
 
-        rows = get_player_map_winrates(player_id, champions=champions, filters=match_filters, min_games=min_games)
+        rows = get_player_map_winrates(
+            player_id,
+            champions=champions,
+            filters=match_filters,
+            min_games=min_games,
+            include_all_maps=(min_games <= 1),
+            sort_by_winrate=sort_by_winrate,
+        )
         if not rows:
             detail = f" for {filter_name}" if filter_name else ""
             await ctx.send(f"No map winrate data found for {target_user.display_name}{detail}.")
@@ -1174,6 +1189,10 @@ Show a player's winrate on every map, with optional role/champion filters.
         footer_parts = []
         if min_games > 1:
             footer_parts.append(f"Maps must have at least {min_games} games.")
+        if sort_by_winrate:
+            footer_parts.append("Sorted by winrate.")
+        else:
+            footer_parts.append("Sorted alphabetically.")
         active_filters = _filter_summary(match_filters)
         if active_filters:
             footer_parts.append("Filters: " + "; ".join(active_filters))
@@ -1184,7 +1203,7 @@ Show a player's winrate on every map, with optional role/champion filters.
     CHAMPION_MAP_WINRATES_HELP = """
 Show one champion's winrate on every map.
 
-**Usage:** `!champmapwr <champion> [-m <games>] [filters]`
+**Usage:** `!champmapwr <champion> [-m <games>] [-wr] [filters]`
 
 **Filters:** `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `with <player>`, `against <player>`
 
@@ -1195,6 +1214,7 @@ Show one champion's winrate on every map.
 - `!champmapwr atlas team2` - Atlas map winrates on Team 2.
 - `!champmapwr khan 4-3` - Khan map winrates in 4-3 games.
 - `!champmapwr atlas -m 5` - Atlas maps with at least 5 games.
+- `!champmapwr atlas -wr` - Sort by winrate instead of alphabetically.
 """
 
     @commands.command(
@@ -1209,10 +1229,15 @@ Show one champion's winrate on every map.
             return
 
         min_games = 1
+        sort_by_winrate = False
         cleaned_args = []
         i = 0
         while i < len(args):
             arg = str(args[i])
+            if arg.lower() in {"-wr", "--wr", "-winrate", "--winrate"}:
+                sort_by_winrate = True
+                i += 1
+                continue
             if arg.lower() == "-m":
                 if i + 1 < len(args) and str(args[i + 1]).isdigit():
                     min_games = max(1, int(args[i + 1]))
@@ -1233,7 +1258,13 @@ Show one champion's winrate on every map.
             await ctx.send(f"No champion found matching `{champion_input}`.")
             return
 
-        rows = get_champion_map_winrates(champion_name, filters=match_filters, min_games=min_games)
+        rows = get_champion_map_winrates(
+            champion_name,
+            filters=match_filters,
+            min_games=min_games,
+            include_all_maps=(min_games <= 1),
+            sort_by_winrate=sort_by_winrate,
+        )
         if not rows:
             await ctx.send(f"No map winrate data found for {champion_name}.")
             return
@@ -1261,6 +1292,10 @@ Show one champion's winrate on every map.
         footer_parts = []
         if min_games > 1:
             footer_parts.append(f"Maps must have at least {min_games} games.")
+        if sort_by_winrate:
+            footer_parts.append("Sorted by winrate.")
+        else:
+            footer_parts.append("Sorted alphabetically.")
         active_filters = _filter_summary(match_filters)
         if active_filters:
             footer_parts.append("Filters: " + "; ".join(active_filters))

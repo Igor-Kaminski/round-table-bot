@@ -1100,7 +1100,42 @@ def get_match_history(player_id, limit: int = 30):
         conn.close()
 
 
-def get_player_map_winrates(player_id, champions=None, filters=None, min_games=1):
+def _get_all_map_names(cursor):
+    cursor.execute("SELECT DISTINCT map FROM matches WHERE map IS NOT NULL AND TRIM(map) != '' ORDER BY map ASC;")
+    return [row[0] for row in cursor.fetchall()]
+
+
+def _map_winrate_rows(cursor, query, params, min_games=1, include_all_maps=True, sort_by_winrate=False):
+    all_maps = _get_all_map_names(cursor) if include_all_maps else []
+    cursor.execute(query, params + [min_games])
+    rows_by_map = {}
+    for row in cursor.fetchall():
+        wins = row["wins"] or 0
+        games = row["games"] or 0
+        rows_by_map[row["map"]] = {
+            "map": row["map"],
+            "games": games,
+            "wins": wins,
+            "losses": games - wins,
+            "winrate": round((wins / games) * 100, 2) if games else 0,
+        }
+
+    if include_all_maps:
+        for map_name in all_maps:
+            rows_by_map.setdefault(
+                map_name,
+                {"map": map_name, "games": 0, "wins": 0, "losses": 0, "winrate": 0},
+            )
+
+    rows = list(rows_by_map.values())
+    if sort_by_winrate:
+        rows.sort(key=lambda row: (-row["winrate"], -row["games"], row["map"].lower()))
+    else:
+        rows.sort(key=lambda row: row["map"].lower())
+    return rows
+
+
+def get_player_map_winrates(player_id, champions=None, filters=None, min_games=1, include_all_maps=True, sort_by_winrate=False):
     conn = sqlite3.connect("match_data.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -1132,26 +1167,13 @@ def get_player_map_winrates(player_id, champions=None, filters=None, min_games=1
             WHERE {where_clause}
             GROUP BY m.map
             HAVING games >= ?
-            ORDER BY (CAST(wins AS REAL) / games) DESC, games DESC, m.map ASC;
         """
-        cursor.execute(query, params + [min_games])
-        rows = []
-        for row in cursor.fetchall():
-            wins = row["wins"] or 0
-            games = row["games"] or 0
-            rows.append({
-                "map": row["map"],
-                "games": games,
-                "wins": wins,
-                "losses": games - wins,
-                "winrate": round((wins / games) * 100, 2) if games else 0,
-            })
-        return rows
+        return _map_winrate_rows(cursor, query, params, min_games, include_all_maps, sort_by_winrate)
     finally:
         conn.close()
 
 
-def get_champion_map_winrates(champion, filters=None, min_games=1):
+def get_champion_map_winrates(champion, filters=None, min_games=1, include_all_maps=True, sort_by_winrate=False):
     champion = resolve_champion_name(champion) or champion
     conn = sqlite3.connect("match_data.db")
     conn.row_factory = sqlite3.Row
@@ -1178,21 +1200,8 @@ def get_champion_map_winrates(champion, filters=None, min_games=1):
             WHERE {where_clause}
             GROUP BY m.map
             HAVING games >= ?
-            ORDER BY (CAST(wins AS REAL) / games) DESC, games DESC, m.map ASC;
         """
-        cursor.execute(query, params + [min_games])
-        rows = []
-        for row in cursor.fetchall():
-            wins = row["wins"] or 0
-            games = row["games"] or 0
-            rows.append({
-                "map": row["map"],
-                "games": games,
-                "wins": wins,
-                "losses": games - wins,
-                "winrate": round((wins / games) * 100, 2) if games else 0,
-            })
-        return rows
+        return _map_winrate_rows(cursor, query, params, min_games, include_all_maps, sort_by_winrate)
     finally:
         conn.close()
 
