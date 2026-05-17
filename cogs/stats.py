@@ -39,29 +39,6 @@ def get_champion_icon_path(champion_name):
     return os.path.join("icons", "champ_icons", f"{formatted_name}.png")
 
 
-def _asset_key(name):
-    return re.sub(r"[^a-z0-9]+", "_", str(name).lower().replace("'", "")).strip("_")
-
-
-def get_map_icon_path(map_name):
-    cleaned = str(map_name)
-    for token in ("(Day)", "(Night)", "Custom"):
-        cleaned = cleaned.replace(token, "")
-    key = _asset_key(cleaned)
-    candidates = [os.path.join("icons", "maps", f"{key}.png")]
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return None
-
-
-def get_role_icon_path(role_name):
-    role_key = _asset_key(role_name)
-    if role_key in {"point_tank", "off_tank", "tank", "frontline"}:
-        role_key = "tank"
-    return os.path.join("icons", "roles", f"{role_key}.png")
-
-
 RESULT_FILTER_ALIASES = {
     "win": "wins", "wins": "wins", "won": "wins", "wonly": "wins",
     "winonly": "wins", "winsonly": "wins",
@@ -515,10 +492,6 @@ class Stats(commands.Cog):
                     embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=author_icon)
                 else:
                     embed.set_author(name=f"{target_user.display_name}'s Stats")
-                role_icon_path = get_role_icon_path(role_name)
-                if os.path.exists(role_icon_path):
-                    icon_file = discord.File(role_icon_path, filename="role_icon.png")
-                    embed.set_thumbnail(url="attachment://role_icon.png")
                 
                 data = {
                     f"--- Role: {role_name} ({role_stats['games']} games) ---": "",
@@ -1187,11 +1160,6 @@ Show a player's winrate on every map, with optional role/champion filters.
 
         embed = discord.Embed(title=title, color=discord.Color.blue())
         rows = rows[:35]
-        icon_file = None
-        top_map_icon = get_map_icon_path(rows[0]["map"])
-        if top_map_icon:
-            icon_file = discord.File(top_map_icon, filename="map_icon.png")
-            embed.set_thumbnail(url="attachment://map_icon.png")
         name_width = min(24, max(len(row["map"]) for row in rows))
         header = f"{'Map':<{name_width}}  {'Record':<7} {'WR':>7}"
         lines = [header, "-" * len(header)]
@@ -1211,7 +1179,7 @@ Show a player's winrate on every map, with optional role/champion filters.
             footer_parts.append("Filters: " + "; ".join(active_filters))
         if footer_parts:
             embed.set_footer(text=" • ".join(footer_parts))
-        await ctx.send(embed=embed, file=icon_file)
+        await ctx.send(embed=embed)
 
     CHAMPION_MAP_WINRATES_HELP = """
 Show one champion's winrate on every map.
