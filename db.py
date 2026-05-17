@@ -941,6 +941,7 @@ def get_player_stats(player_id, champions=None, filters=None):
             "damage_delta": round((data["total_damage"] - data["total_taken"]) / games_played) if games_played > 0 else 0,
             "kill_share": data["avg_kill_share"] or 0,
             "damage_share": data["avg_damage_share"] or 0,
+            "damage_healed_pct": round((data["total_healing"] / max(1, data["total_damage"])) * 100, 2),
         }
 
         total_healing = data["total_healing"]
@@ -1112,6 +1113,52 @@ def get_player_map_winrates(player_id, champions=None, filters=None, min_games=1
             where_conditions.append(f"ps.champ IN ({placeholders})")
             params.extend(champions)
 
+        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+        where_clause = " AND ".join(where_conditions)
+
+        query = f"""
+            SELECT
+                m.map,
+                COUNT(ps.match_id) AS games,
+                SUM(
+                    CASE
+                        WHEN (ps.team = 1 AND m.team1_score > m.team2_score)
+                          OR (ps.team = 2 AND m.team2_score > m.team1_score)
+                        THEN 1 ELSE 0
+                    END
+                ) AS wins
+            FROM player_stats ps
+            JOIN matches m ON ps.match_id = m.match_id
+            WHERE {where_clause}
+            GROUP BY m.map
+            HAVING games >= ?
+            ORDER BY (CAST(wins AS REAL) / games) DESC, games DESC, m.map ASC;
+        """
+        cursor.execute(query, params + [min_games])
+        rows = []
+        for row in cursor.fetchall():
+            wins = row["wins"] or 0
+            games = row["games"] or 0
+            rows.append({
+                "map": row["map"],
+                "games": games,
+                "wins": wins,
+                "losses": games - wins,
+                "winrate": round((wins / games) * 100, 2) if games else 0,
+            })
+        return rows
+    finally:
+        conn.close()
+
+
+def get_champion_map_winrates(champion, filters=None, min_games=1):
+    champion = resolve_champion_name(champion) or champion
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        where_conditions = ["ps.champ = ?"]
+        params = [champion]
         _apply_match_filters(where_conditions, params, filters, player_alias="ps")
         where_clause = " AND ".join(where_conditions)
 

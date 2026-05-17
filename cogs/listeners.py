@@ -216,7 +216,7 @@ class Listeners(commands.Cog):
 
                         # Send the match id in the chat if it was successfully extracted
                         if match_id:
-                            await message.channel.send(f"Match ID: {match_id}")
+                            await message.channel.send(f">>match_data {match_id}")
                         else:
                             await message.channel.send("Match ID not found.")
                     finally:

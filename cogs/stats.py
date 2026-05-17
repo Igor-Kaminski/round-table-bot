@@ -3,6 +3,7 @@
 import discord
 from discord.ext import commands
 import os
+import re
 import time
 from utils.converters import PlayerConverter, resolve_player_id
 from utils.views import TopChampsView
@@ -14,6 +15,7 @@ from db import (
     get_player_champion_stats,
     get_match_history,
     get_player_map_winrates,
+    get_champion_map_winrates,
     get_leaderboard,
     get_champion_leaderboard,
     compare_by_player_ids,
@@ -35,6 +37,29 @@ def get_champion_icon_path(champion_name):
     """Formats a champion name into a valid file path for its icon."""
     formatted_name = champion_name.lower().replace(" ", "_").replace("'", "")
     return os.path.join("icons", "champ_icons", f"{formatted_name}.png")
+
+
+def _asset_key(name):
+    return re.sub(r"[^a-z0-9]+", "_", str(name).lower().replace("'", "")).strip("_")
+
+
+def get_map_icon_path(map_name):
+    cleaned = str(map_name)
+    for token in ("(Day)", "(Night)", "Custom"):
+        cleaned = cleaned.replace(token, "")
+    key = _asset_key(cleaned)
+    candidates = [os.path.join("icons", "maps", f"{key}.png")]
+    for path in candidates:
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def get_role_icon_path(role_name):
+    role_key = _asset_key(role_name)
+    if role_key in {"point_tank", "off_tank", "tank", "frontline"}:
+        role_key = "tank"
+    return os.path.join("icons", "roles", f"{role_key}.png")
 
 
 RESULT_FILTER_ALIASES = {
@@ -247,6 +272,7 @@ class Stats(commands.Cog):
             "championleaderboard": "Champion Leaderboard Examples",
             "map": "Map Examples",
             "mapwr": "Map Winrate Examples",
+            "champmapwr": "Champion Map Winrate Examples",
             "filters": "Filter Examples",
             "filter": "Filter Examples",
             "aliases": "Alias Examples",
@@ -257,6 +283,7 @@ class Stats(commands.Cog):
                 "`!examples stats` - Player stat examples.",
                 "`!examples top` - Personal champion table examples.",
                 "`!examples mapwr` - Player map winrate examples.",
+                "`!examples champmapwr` - Champion map winrate examples.",
                 "`!examples lb` - Player leaderboard examples.",
                 "`!examples clb` - Champion leaderboard examples.",
                 "`!examples map` - Map shortcut examples.",
@@ -338,6 +365,18 @@ class Stats(commands.Cog):
                 "`!mapwr Eagle moji losses` - Eagle's Moji map records in losses only.",
                 "`!mapwr Eagle inara 4-3` - Eagle's Inara map WR in 4-3 games.",
             ],
+            "champmapwr": [
+                "`!champmapwr atlas` - Atlas winrate on every map.",
+                "`!champmapwr khan` - Khan winrate on every map.",
+                "`!champmapwr bk` - Bomb King winrate on every map.",
+                "`!champmapwr damba` - Mal'Damba winrate on every map.",
+                "`!champmapwr atlas team2` - Atlas map WR on Team 2.",
+                "`!champmapwr khan 4-3` - Khan map WR in 4-3 games.",
+                "`!champmapwr atlas close` - Atlas map WR in close games.",
+                "`!champmapwr khan against nozy` - Khan map WR against nozy.",
+                "`!champmapwr atlas -m 5` - Atlas map WR, maps with 5+ games only.",
+                "`!cmapwr ying losses` - Ying map records in losses only.",
+            ],
             "filters": [
                 "`team1` / `team2` - Filter by draft side, e.g. `!lb wr barik team2`.",
                 "`4-3` - Exact scoreline, e.g. `!lb wr inara 4-3`.",
@@ -373,6 +412,10 @@ class Stats(commands.Cog):
             "mapwinrates": "mapwr",
             "mapstats": "mapwr",
             "maps": "mapwr",
+            "champmaps": "champmapwr",
+            "champmap": "champmapwr",
+            "championmapwr": "champmapwr",
+            "cmapwr": "champmapwr",
             "filter": "filters",
             "alias": "aliases",
         }
@@ -382,7 +425,7 @@ class Stats(commands.Cog):
 
         embed = discord.Embed(
             title=topic_titles.get(topic_key, "Command Examples"),
-            description="Use `!examples stats`, `!examples lb`, `!examples map`, or `!examples filters` for focused examples.",
+            description="Use `!examples stats`, `!examples lb`, `!examples mapwr`, `!examples champmapwr`, or `!examples filters` for focused examples.",
             color=discord.Color.green(),
         )
         embed.add_field(name="Examples", value="\n".join(examples_by_topic[topic_key]), inline=False)
@@ -392,8 +435,8 @@ class Stats(commands.Cog):
         name="examples",
         aliases=["example"],
         help=(
-            "Show useful command examples. Usage: `!examples [stats|top|lb|clb|map|filters|aliases]`.\n"
-            "Examples: `!examples`, `!examples lb`, `!examples filters`, `!examples stats`, `!examples map`."
+            "Show useful command examples. Usage: `!examples [stats|top|lb|clb|map|mapwr|champmapwr|filters|aliases]`.\n"
+            "Examples: `!examples`, `!examples lb`, `!examples filters`, `!examples mapwr`, `!examples champmapwr`."
         ),
     )
     async def examples_cmd(self, ctx, *, topic: str = None):
@@ -472,6 +515,10 @@ class Stats(commands.Cog):
                     embed.set_author(name=f"{target_user.display_name}'s Stats", icon_url=author_icon)
                 else:
                     embed.set_author(name=f"{target_user.display_name}'s Stats")
+                role_icon_path = get_role_icon_path(role_name)
+                if os.path.exists(role_icon_path):
+                    icon_file = discord.File(role_icon_path, filename="role_icon.png")
+                    embed.set_thumbnail(url="attachment://role_icon.png")
                 
                 data = {
                     f"--- Role: {role_name} ({role_stats['games']} games) ---": "",
@@ -479,6 +526,7 @@ class Stats(commands.Cog):
                     "KDA": f"{role_stats['kda_ratio']:.2f} ({role_stats['raw_k']}/{role_stats['raw_d']}/{role_stats['raw_a']})",
                     "Kill Participation": f"{role_stats['kill_share']:.2f}%",
                     "Damage Share": f"{role_stats['damage_share']:.2f}%",
+                    "Damage Healed": f"{role_stats['damage_healed_pct']:.2f}%",
                     "--- Per Minute ---": "",
                     "Kills/Min": f"{role_stats['kills_pm']:.2f}",
                     "Deaths/Min": f"{role_stats['deaths_pm']:.2f}",
@@ -533,6 +581,7 @@ class Stats(commands.Cog):
                     "KDA": f"{champ_stats['kda_ratio']:.2f} ({champ_stats['raw_k']}/{champ_stats['raw_d']}/{champ_stats['raw_a']})",
                     "Kill Participation": f"{champ_stats['kill_share']:.2f}%",
                     "Damage Share": f"{champ_stats['damage_share']:.2f}%",
+                    "Damage Healed": f"{champ_stats['damage_healed_pct']:.2f}%",
                     "Kills/Min": f"{champ_stats['kills_pm']:.2f}",
                     "Deaths/Min": f"{champ_stats['deaths_pm']:.2f}",
                     "Damage/Min": f"{int(champ_stats['damage_dealt_pm']):,}",
@@ -579,6 +628,7 @@ class Stats(commands.Cog):
                 "KDA": f"{stats['kda_ratio']:.2f} ({stats['raw_k']}/{stats['raw_d']}/{stats['raw_a']})",
                 "Kill Participation": f"{stats['kill_share']:.2f}%",
                 "Damage Share": f"{stats['damage_share']:.2f}%",
+                "Damage Healed": f"{stats['damage_healed_pct']:.2f}%",
                 "--- Per Minute ---": "",
                 "Kills/Min": f"{stats['kills_pm']:.2f}",
                 "Deaths/Min": f"{stats['deaths_pm']:.2f}",
@@ -1137,6 +1187,11 @@ Show a player's winrate on every map, with optional role/champion filters.
 
         embed = discord.Embed(title=title, color=discord.Color.blue())
         rows = rows[:35]
+        icon_file = None
+        top_map_icon = get_map_icon_path(rows[0]["map"])
+        if top_map_icon:
+            icon_file = discord.File(top_map_icon, filename="map_icon.png")
+            embed.set_thumbnail(url="attachment://map_icon.png")
         name_width = min(24, max(len(row["map"]) for row in rows))
         header = f"{'Map':<{name_width}}  {'Record':<7} {'WR':>7}"
         lines = [header, "-" * len(header)]
@@ -1156,7 +1211,94 @@ Show a player's winrate on every map, with optional role/champion filters.
             footer_parts.append("Filters: " + "; ".join(active_filters))
         if footer_parts:
             embed.set_footer(text=" • ".join(footer_parts))
-        await ctx.send(embed=embed)
+        await ctx.send(embed=embed, file=icon_file)
+
+    CHAMPION_MAP_WINRATES_HELP = """
+Show one champion's winrate on every map.
+
+**Usage:** `!champmapwr <champion> [-m <games>] [filters]`
+
+**Filters:** `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `with <player>`, `against <player>`
+
+**Examples:**
+- `!champmapwr atlas` - Atlas map winrates.
+- `!champmapwr khan` - Khan map winrates.
+- `!champmapwr bk` - Bomb King map winrates.
+- `!champmapwr atlas team2` - Atlas map winrates on Team 2.
+- `!champmapwr khan 4-3` - Khan map winrates in 4-3 games.
+- `!champmapwr atlas -m 5` - Atlas maps with at least 5 games.
+"""
+
+    @commands.command(
+        name="champmapwr",
+        aliases=["cmapwr", "champmaps", "champmap", "champ_mapwr"],
+        help=CHAMPION_MAP_WINRATES_HELP,
+    )
+    async def champion_map_winrates_cmd(self, ctx, *args):
+        args, match_filters, filter_error = await _extract_match_filters(ctx, args)
+        if filter_error:
+            await ctx.send(filter_error)
+            return
+
+        min_games = 1
+        cleaned_args = []
+        i = 0
+        while i < len(args):
+            arg = str(args[i])
+            if arg.lower() == "-m":
+                if i + 1 < len(args) and str(args[i + 1]).isdigit():
+                    min_games = max(1, int(args[i + 1]))
+                    i += 2
+                    continue
+                await ctx.send("`-m` needs a number after it, like `!champmapwr atlas -m 5`.")
+                return
+            cleaned_args.append(arg)
+            i += 1
+
+        if not cleaned_args:
+            await ctx.send("Usage: `!champmapwr <champion> [filters]`")
+            return
+
+        champion_input = " ".join(cleaned_args)
+        champion_name = resolve_champion_name(champion_input) or champion_input.title()
+        if champion_name not in CHAMPION_ROLES:
+            await ctx.send(f"No champion found matching `{champion_input}`.")
+            return
+
+        rows = get_champion_map_winrates(champion_name, filters=match_filters, min_games=min_games)
+        if not rows:
+            await ctx.send(f"No map winrate data found for {champion_name}.")
+            return
+
+        title = f"Map Winrates for {champion_name}{_title_filter_suffix(match_filters)}"
+        embed = discord.Embed(title=title, color=discord.Color.blue())
+        icon_file = None
+        champ_icon = get_champion_icon_path(champion_name)
+        if os.path.exists(champ_icon):
+            icon_file = discord.File(champ_icon, filename="champ_icon.png")
+            embed.set_thumbnail(url="attachment://champ_icon.png")
+
+        rows = rows[:35]
+        name_width = min(24, max(len(row["map"]) for row in rows))
+        header = f"{'Map':<{name_width}}  {'Record':<7} {'WR':>7}"
+        lines = [header, "-" * len(header)]
+        for row in rows:
+            map_name = row["map"]
+            if len(map_name) > name_width:
+                map_name = map_name[:name_width - 1] + "…"
+            record = f"{row['wins']}-{row['losses']}"
+            lines.append(f"{map_name:<{name_width}}  {record:<7} {row['winrate']:>6.2f}%")
+
+        embed.description = "```\n" + "\n".join(lines) + "\n```"
+        footer_parts = []
+        if min_games > 1:
+            footer_parts.append(f"Maps must have at least {min_games} games.")
+        active_filters = _filter_summary(match_filters)
+        if active_filters:
+            footer_parts.append("Filters: " + "; ".join(active_filters))
+        if footer_parts:
+            embed.set_footer(text=" • ".join(footer_parts))
+        await ctx.send(embed=embed, file=icon_file)
 
     LEADERBOARD_HELP = """
 Shows player rankings, with optional filters for champions or roles.
