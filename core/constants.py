@@ -29,6 +29,7 @@ CHAMPION_ALIASES = {
     "bk": "Bomb King",
     "bombking": "Bomb King",
     "damba": "Mal'Damba",
+    "lilith": "Lillith",
     "mal damba": "Mal'Damba",
     "maldamba": "Mal'Damba",
     "ruk": "Ruckus",
