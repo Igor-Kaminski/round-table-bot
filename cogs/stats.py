@@ -235,11 +235,11 @@ def _resolve_leading_map(args):
 
 def _format_stat_block(data):
     label_width = 19
-    min_line_width = 43
+    min_line_width = 44
     lines = []
     for label, value in data.items():
         if value:
-            line = f"{label + ':':<{label_width}} {value}"
+            line = f"{label + ':':<{label_width}}  {value}"
         else:
             line = label
         lines.append(line.ljust(min_line_width))
