@@ -234,7 +234,7 @@ def _resolve_leading_map(args):
 
 
 def _format_stat_block(data):
-    label_width = 19
+    label_width = 17
     lines = []
     for label, value in data.items():
         if value:
