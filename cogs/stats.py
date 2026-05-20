@@ -16,6 +16,7 @@ from db import (
     get_match_history,
     get_player_map_winrates,
     get_champion_map_winrates,
+    get_champion_overall_stats,
     get_leaderboard,
     get_champion_leaderboard,
     compare_by_player_ids,
@@ -232,6 +233,25 @@ def _resolve_leading_map(args):
     return None, args
 
 
+def _format_stat_block(data):
+    lines = []
+    for label, value in data.items():
+        if value:
+            lines.append(f"{label}: {value}")
+        else:
+            lines.append(label)
+    return lines
+
+
+def _split_champion_pair(args):
+    for split_at in range(1, len(args)):
+        first = resolve_champion_name(" ".join(args[:split_at]))
+        second = resolve_champion_name(" ".join(args[split_at:]))
+        if first and second:
+            return first, second
+    return None, None
+
+
 class Stats(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -250,6 +270,7 @@ class Stats(commands.Cog):
             "map": "Map Examples",
             "mapwr": "Map Winrate Examples",
             "champmapwr": "Champion Map Winrate Examples",
+            "champcompare": "Champion Compare Examples",
             "filters": "Filter Examples",
             "filter": "Filter Examples",
             "aliases": "Alias Examples",
@@ -261,6 +282,7 @@ class Stats(commands.Cog):
                 "`!examples top` - Personal champion table examples.",
                 "`!examples mapwr` - Player map winrate examples.",
                 "`!examples champmapwr` - Champion map winrate examples.",
+                "`!examples champcompare` - Champion comparison examples.",
                 "`!examples lb` - Player leaderboard examples.",
                 "`!examples clb` - Champion leaderboard examples.",
                 "`!examples map` - Map shortcut examples.",
@@ -356,6 +378,16 @@ class Stats(commands.Cog):
                 "`!cmapwr ying losses` - Ying map records in losses only.",
                 "`!champmapwr khan -wr` - Khan map WR sorted by winrate.",
             ],
+            "champcompare": [
+                "`!champcompare atlas khan` - Compare Atlas and Khan overall plus map records.",
+                "`!champcompare pip damba` - Compare Pip and Mal'Damba support stats.",
+                "`!champcompare bk willo` - Compare Bomb King and Willo.",
+                "`!champcompare atlas khan team2` - Compare both champs on Team 2 only.",
+                "`!champcompare atlas khan 4-3` - Compare both champs in 4-3 games.",
+                "`!champcompare ying lilith against nozy` - Compare both champs against nozy.",
+                "`!champcompare barik inara map jaguar falls` - Compare map-filtered point tanks.",
+                "`!cc andy evie close` - Short alias, close games only.",
+            ],
             "filters": [
                 "`team1` / `team2` - Filter by draft side, e.g. `!lb wr barik team2`.",
                 "`4-3` - Exact scoreline, e.g. `!lb wr inara 4-3`.",
@@ -395,6 +427,9 @@ class Stats(commands.Cog):
             "champmap": "champmapwr",
             "championmapwr": "champmapwr",
             "cmapwr": "champmapwr",
+            "cc": "champcompare",
+            "ccompare": "champcompare",
+            "champcmp": "champcompare",
             "filter": "filters",
             "alias": "aliases",
         }
@@ -404,7 +439,7 @@ class Stats(commands.Cog):
 
         embed = discord.Embed(
             title=topic_titles.get(topic_key, "Command Examples"),
-            description="Use `!examples stats`, `!examples lb`, `!examples mapwr`, `!examples champmapwr`, or `!examples filters` for focused examples.",
+            description="Use `!examples stats`, `!examples lb`, `!examples mapwr`, `!examples champcompare`, or `!examples filters` for focused examples.",
             color=discord.Color.green(),
         )
         embed.add_field(name="Examples", value="\n".join(examples_by_topic[topic_key]), inline=False)
@@ -522,8 +557,7 @@ class Stats(commands.Cog):
                     "AVG Credits": f"{int(role_stats['avg_credits']):,}",
                     "AVG Objective Time": f"{int(role_stats['obj_time']):,}",
                 }
-                max_label_len = max(len(label) for label in data.keys())
-                stat_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in data.items()]
+                stat_lines = _format_stat_block(data)
                 embed.description = "```\n" + "\n".join(stat_lines) + "\n```"
 
             # --- CHAMPION-BASED STATS ---
@@ -581,9 +615,8 @@ class Stats(commands.Cog):
                     "Global KDA": f"{global_stats['kda_ratio']:.2f}",
                 }
 
-                max_label_len = max(len(label) for label in list(champ_data.keys()) + list(global_data.keys()))
-                champ_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in champ_data.items()]
-                global_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in global_data.items()]
+                champ_lines = _format_stat_block(champ_data)
+                global_lines = _format_stat_block(global_data)
                 embed.description = "```\n" + "\n".join(champ_lines) + "\n\n" + "\n".join(global_lines) + "\n```"
 
         # --- GENERAL STATS (No Filter) ---
@@ -624,8 +657,7 @@ class Stats(commands.Cog):
                 "AVG Credits": f"{int(stats['avg_credits']):,}",
                 "AVG Objective Time": f"{int(stats['obj_time']):,}",
             }
-            max_label_len = max(len(label) for label in data.keys())
-            stat_lines = [f"{label + ':':<{max_label_len + 2}} {value}" if value else label for label, value in data.items()]
+            stat_lines = _format_stat_block(data)
             embed.description = "```\n" + "\n".join(stat_lines) + "\n```"
         
         # Set the footer
@@ -1205,6 +1237,118 @@ Show a player's winrate on every map, with optional role/champion filters.
         if footer_parts:
             embed.set_footer(text=" • ".join(footer_parts))
         await ctx.send(embed=embed, file=icon_file)
+
+    CHAMPION_COMPARE_HELP = """
+Compare two champions overall and by map.
+
+**Usage:** `!champcompare <champion1> <champion2> [filters]`
+
+**Filters:** `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `map <name>`, `with <player>`, `against <player>`
+
+**Examples:**
+- `!champcompare atlas khan`
+- `!champcompare pip damba`
+- `!champcompare bk willo team2`
+- `!champcompare atlas khan 4-3`
+- `!champcompare ying lilith against nozy`
+"""
+
+    @commands.command(
+        name="champcompare",
+        aliases=["ccompare", "champcmp", "cc", "comparechamps"],
+        help=CHAMPION_COMPARE_HELP,
+    )
+    async def champion_compare_cmd(self, ctx, *args):
+        args, match_filters, filter_error = await _extract_match_filters(ctx, args)
+        if filter_error:
+            await ctx.send(filter_error)
+            return
+
+        if len(args) < 2:
+            await ctx.send("Usage: `!champcompare <champion1> <champion2> [filters]`, like `!champcompare atlas khan`.")
+            return
+
+        first_champ, second_champ = _split_champion_pair(list(args))
+        if not first_champ or not second_champ:
+            await ctx.send("I couldn't find two champions there. Try aliases like `bk`, `damba`, `andy`, or full names like `bomb king`.")
+            return
+        if first_champ == second_champ:
+            await ctx.send("Pick two different champions to compare.")
+            return
+
+        first_stats = get_champion_overall_stats(first_champ, filters=match_filters)
+        second_stats = get_champion_overall_stats(second_champ, filters=match_filters)
+        if not first_stats and not second_stats:
+            await ctx.send(f"No comparison data found for {first_champ} or {second_champ}.")
+            return
+
+        def stat_value(stats, key, formatter, fallback="--"):
+            if not stats:
+                return fallback
+            value = stats.get(key)
+            if value is None:
+                return fallback
+            return formatter(value)
+
+        def record(stats):
+            if not stats:
+                return "--"
+            return f"{stats['wins']}-{stats['losses']}"
+
+        first_label = first_champ[:12]
+        second_label = second_champ[:12]
+        rows = [
+            ("Games", stat_value(first_stats, "games", lambda v: f"{v:,}"), stat_value(second_stats, "games", lambda v: f"{v:,}")),
+            ("Record", record(first_stats), record(second_stats)),
+            ("Winrate", stat_value(first_stats, "winrate", lambda v: f"{v:.2f}%"), stat_value(second_stats, "winrate", lambda v: f"{v:.2f}%")),
+            ("KDA", stat_value(first_stats, "kda", lambda v: f"{v:.2f}"), stat_value(second_stats, "kda", lambda v: f"{v:.2f}")),
+            ("DPM", stat_value(first_stats, "dpm", lambda v: f"{round(v):,}"), stat_value(second_stats, "dpm", lambda v: f"{round(v):,}")),
+            ("HPM", stat_value(first_stats, "hpm", lambda v: f"{round(v):,}"), stat_value(second_stats, "hpm", lambda v: f"{round(v):,}")),
+            ("Dmg Healed", stat_value(first_stats, "damage_healed_pct", lambda v: f"{v:.2f}%"), stat_value(second_stats, "damage_healed_pct", lambda v: f"{v:.2f}%")),
+            ("KP", stat_value(first_stats, "kp", lambda v: f"{v:.2f}%"), stat_value(second_stats, "kp", lambda v: f"{v:.2f}%")),
+            ("Dmg Share", stat_value(first_stats, "dmg_share", lambda v: f"{v:.2f}%"), stat_value(second_stats, "dmg_share", lambda v: f"{v:.2f}%")),
+            ("Taken/min", stat_value(first_stats, "taken_pm", lambda v: f"{round(v):,}"), stat_value(second_stats, "taken_pm", lambda v: f"{round(v):,}")),
+            ("Credits/min", stat_value(first_stats, "credits_pm", lambda v: f"{round(v):,}"), stat_value(second_stats, "credits_pm", lambda v: f"{round(v):,}")),
+        ]
+
+        header = f"{'Stat':<12} {first_label:>12} {second_label:>12}"
+        stat_lines = [header, "-" * len(header)]
+        stat_lines.extend(f"{name:<12} {left:>12} {right:>12}" for name, left, right in rows)
+
+        first_maps = {row["map"]: row for row in get_champion_map_winrates(first_champ, filters=match_filters)}
+        second_maps = {row["map"]: row for row in get_champion_map_winrates(second_champ, filters=match_filters)}
+        map_names = sorted(set(first_maps) | set(second_maps), key=str.lower)
+
+        def map_cell(row):
+            if not row or not row.get("games"):
+                return "--"
+            return f"{row['wins']}-{row['losses']} {row['winrate']:.0f}%"
+
+        map_lines = []
+        if map_names:
+            map_header = f"{'Map':<18} {first_label:>11} {second_label:>11}"
+            map_lines = [map_header, "-" * len(map_header)]
+            for map_name in map_names[:20]:
+                shown_map = map_name if len(map_name) <= 18 else map_name[:17] + "."
+                map_lines.append(f"{shown_map:<18} {map_cell(first_maps.get(map_name)):>11} {map_cell(second_maps.get(map_name)):>11}")
+
+        embed = discord.Embed(
+            title=f"Champion Compare: {first_champ} vs {second_champ}{_title_filter_suffix(match_filters)}",
+            color=discord.Color.purple(),
+        )
+        embed.add_field(name="Overall", value="```\n" + "\n".join(stat_lines) + "\n```", inline=False)
+        if map_lines:
+            embed.add_field(name="By Map", value="```\n" + "\n".join(map_lines) + "\n```", inline=False)
+
+        footer_parts = []
+        active_filters = _filter_summary(match_filters)
+        if active_filters:
+            footer_parts.append("Filters: " + "; ".join(active_filters))
+        if len(map_names) > 20:
+            footer_parts.append(f"Showing first 20 of {len(map_names)} maps.")
+        if footer_parts:
+            embed.set_footer(text=" â€¢ ".join(footer_parts))
+        await ctx.send(embed=embed)
 
     CHAMPION_MAP_WINRATES_HELP = """
 Show one champion's winrate on every map.

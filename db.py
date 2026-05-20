@@ -894,6 +894,7 @@ def get_player_stats(player_id, champions=None, filters=None):
                 SUM(ps.healing) AS total_healing,
                 SUM(ps.self_healing) AS total_self_healing,
                 SUM(ps.credits) AS total_credits,
+                SUM(ott.team_damage) AS total_enemy_damage,
                 SUM(m.time) AS total_time_in_minutes,
                 SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) AS total_wins,
                 
@@ -903,6 +904,7 @@ def get_player_stats(player_id, champions=None, filters=None):
             FROM player_stats ps
             JOIN matches m ON ps.match_id = m.match_id
             JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
+            JOIN TeamTotals ott ON ps.match_id = ott.match_id AND ps.team != ott.team
             WHERE {where_clause}
         """
 
@@ -941,7 +943,7 @@ def get_player_stats(player_id, champions=None, filters=None):
             "damage_delta": round((data["total_damage"] - data["total_taken"]) / games_played) if games_played > 0 else 0,
             "kill_share": data["avg_kill_share"] or 0,
             "damage_share": data["avg_damage_share"] or 0,
-            "damage_healed_pct": round((data["total_healing"] / max(1, data["total_damage"])) * 100, 2),
+            "damage_healed_pct": round((data["total_healing"] / max(1, data["total_enemy_damage"])) * 100, 2),
         }
 
         total_healing = data["total_healing"]
@@ -956,14 +958,23 @@ def get_player_stats(player_id, champions=None, filters=None):
             _apply_match_filters(healing_conditions, healing_params, filters, player_alias="ps")
             healing_where_clause = " AND ".join(healing_conditions)
             cursor.execute(f"""
-                SELECT SUM(ps.healing), SUM(m.time), COUNT(ps.match_id)
-                FROM player_stats ps JOIN matches m ON ps.match_id = m.match_id
+                WITH TeamTotals AS (
+                    SELECT match_id, team, SUM(damage) AS team_damage
+                    FROM player_stats
+                    GROUP BY match_id, team
+                )
+                SELECT SUM(ps.healing), SUM(m.time), COUNT(ps.match_id), SUM(ott.team_damage)
+                FROM player_stats ps
+                JOIN matches m ON ps.match_id = m.match_id
+                JOIN TeamTotals ott ON ps.match_id = ott.match_id AND ps.team != ott.team
                 WHERE {healing_where_clause}
             """, healing_params)
             healing_row = cursor.fetchone()
             total_healing = healing_row[0] or 0
             support_time = healing_row[1] or 0
             support_games = healing_row[2] or 0
+            support_enemy_damage = healing_row[3] or 0
+            stats_dict["damage_healed_pct"] = round((total_healing / max(1, support_enemy_damage)) * 100, 2)
             
         stats_dict["healing_pm"] = round(total_healing / max(1, support_time), 2)
         stats_dict["avg_healing"] = round(total_healing / max(1, support_games))
@@ -1209,6 +1220,96 @@ def get_champion_map_winrates(champion, filters=None, min_games=1, include_all_m
             HAVING games >= ?
         """
         return _map_winrate_rows(cursor, query, params, min_games, include_all_maps, sort_by_winrate)
+    finally:
+        conn.close()
+
+
+def get_champion_overall_stats(champion, filters=None):
+    champion = resolve_champion_name(champion) or champion
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        where_conditions = ["ms.champ = ?", "m.time > 0"]
+        params = [champion]
+        _apply_match_filters(where_conditions, params, filters, player_alias="ms")
+        where_clause = " AND ".join(where_conditions)
+
+        query = f"""
+            WITH TeamTotals AS (
+                SELECT
+                    match_id,
+                    team,
+                    SUM(kills + assists) AS team_kill_participations,
+                    SUM(damage) AS team_damage
+                FROM player_stats
+                GROUP BY match_id, team
+            ),
+            MatchShares AS (
+                SELECT
+                    ps.*,
+                    tt.team_kill_participations,
+                    tt.team_damage,
+                    ott.team_damage AS enemy_team_damage,
+                    CASE WHEN tt.team_kill_participations > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kill_participations ELSE 0 END AS kill_share,
+                    CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END AS damage_share
+                FROM player_stats ps
+                JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
+                JOIN TeamTotals ott ON ps.match_id = ott.match_id AND ps.team != ott.team
+            )
+            SELECT
+                COUNT(ms.match_id) AS games,
+                SUM(CASE WHEN (ms.team = 1 AND m.team1_score > m.team2_score) OR (ms.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) AS wins,
+                SUM(ms.kills) AS kills,
+                SUM(ms.deaths) AS deaths,
+                SUM(ms.assists) AS assists,
+                SUM(ms.damage) AS damage,
+                SUM(ms.taken) AS taken,
+                SUM(ms.healing) AS healing,
+                SUM(ms.self_healing) AS self_healing,
+                SUM(ms.shielding) AS shielding,
+                SUM(ms.credits) AS credits,
+                SUM(ms.objective_time) AS objective_time,
+                SUM(ms.enemy_team_damage) AS enemy_damage,
+                SUM(m.time) AS minutes,
+                AVG(ms.kill_share) AS kp,
+                AVG(ms.damage_share) AS dmg_share
+            FROM MatchShares ms
+            JOIN matches m ON ms.match_id = m.match_id
+            WHERE {where_clause}
+        """
+        cursor.execute(query, params)
+        row = cursor.fetchone()
+        if not row or not row["games"]:
+            return None
+
+        games = row["games"]
+        minutes = row["minutes"] or 1
+        wins = row["wins"] or 0
+        damage = row["damage"] or 0
+        healing = row["healing"] or 0
+        enemy_damage = row["enemy_damage"] or 0
+        return {
+            "champ": champion,
+            "games": games,
+            "wins": wins,
+            "losses": games - wins,
+            "winrate": round(wins * 100.0 / games, 2),
+            "kda": round(((row["kills"] or 0) + (row["assists"] or 0)) / max(1, row["deaths"] or 0), 2),
+            "raw_k": row["kills"] or 0,
+            "raw_d": row["deaths"] or 0,
+            "raw_a": row["assists"] or 0,
+            "dpm": round(damage / minutes, 2),
+            "taken_pm": round((row["taken"] or 0) / minutes, 2),
+            "hpm": round(healing / minutes, 2),
+            "self_heal_pm": round((row["self_healing"] or 0) / minutes, 2),
+            "shield_avg": round((row["shielding"] or 0) / games),
+            "credits_pm": round((row["credits"] or 0) / minutes, 2),
+            "obj_avg": round((row["objective_time"] or 0) / games, 2),
+            "damage_healed_pct": round(healing * 100.0 / max(1, enemy_damage), 2),
+            "kp": round(row["kp"] or 0, 2),
+            "dmg_share": round(row["dmg_share"] or 0, 2),
+        }
     finally:
         conn.close()
 
