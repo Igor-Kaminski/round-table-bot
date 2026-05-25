@@ -946,82 +946,57 @@ Shows champion statistics breakdown for a player.
         
         # Build the table
         lines = []
-        table_rows = []
-
-        def formatted_stat(champ, stat):
-            value = champ.get(stat, 0)
-            formatter = stat_formatters.get(stat, str)
-            return formatter(value)
-
-        def add_champ_row(index, champ):
-            table_rows.append(
-                {
-                    "role": None,
-                    "champion": f"{index}. {champ['champ'][:14]}",
-                    "stats": {stat: formatted_stat(champ, stat) for stat in stat_flags},
-                }
-            )
-
-        if not role_filter and not champion_filter:
-            for role in ["Damage", "Flank", "Point Tank", "Off Tank", "Support"]:
-                role_champ_names = set(get_champions_for_role(role))
-                role_champs = [c for c in champ_data if c["champ"] in role_champ_names]
-                if role_champs:
-                    table_rows.append({"role": role})
-                    for i, champ in enumerate(role_champs[:10], 1):
-                        add_champ_row(i, champ)
-        else:
-            for i, champ in enumerate(champ_data[:30], 1):
-                add_champ_row(i, champ)
-
-        champ_width = max(
-            [len("Champion")]
-            + [len(row["champion"]) for row in table_rows if "champion" in row],
-            default=18,
-        )
-        champ_width = max(18, min(champ_width, 22))
-
-        col_widths = {}
+        
+        # Determine column widths
+        col_widths = {'champ': 16}
         for stat in stat_flags:
             display_name = stat_display_names.get(stat, stat)
-            values = [row["stats"][stat] for row in table_rows if "stats" in row]
-            col_widths[stat] = max(len(display_name), *(len(value) for value in values), 4)
-
-        def build_header():
-            parts = [f"{'Champion':<{champ_width}}"]
-            for stat in stat_flags:
-                display_name = stat_display_names.get(stat, stat)
-                parts.append(f"{display_name:>{col_widths[stat]}}")
-            return "  ".join(parts)
-
-        def build_row(row):
-            parts = [f"{row['champion']:<{champ_width}}"]
-            for stat in stat_flags:
-                parts.append(f"{row['stats'][stat]:>{col_widths[stat]}}")
-            return "  ".join(parts)
-
-        header = build_header()
+            col_widths[stat] = max(len(display_name) + 2, 10)
+        
+        # Build header
+        header_parts = [f"{'Champion':<16}"]
+        for stat in stat_flags:
+            display_name = stat_display_names.get(stat, stat)
+            header_parts.append(f"{display_name:<{col_widths[stat]}}")
+        header = "".join(header_parts)
         separator = "-" * len(header)
         
         # Add data rows grouped by role
         if not role_filter and not champion_filter:
-            current_role_has_rows = False
-            for row in table_rows:
-                if "role" in row and row.get("role"):
-                    if current_role_has_rows:
-                        lines.append("")
-                    lines.append(f"# {row['role']}")
+            # Group by role
+            for role in ["Damage", "Flank", "Point Tank", "Off Tank", "Support"]:
+                role_champ_names = set(get_champions_for_role(role))
+                role_champs = [c for c in champ_data if c["champ"] in role_champ_names]
+                if role_champs:
                     lines.append(header)
                     lines.append(separator)
-                    current_role_has_rows = True
-                    continue
-                lines.append(build_row(row))
+                    lines.append(f"# {role}")
+                    
+                    for i, champ in enumerate(role_champs[:10], 1):  # Limit to top 10 per role
+                        row_parts = [f"{i}. {champ['champ'][:14]:<14}"]
+                        for stat in stat_flags:
+                            value = champ.get(stat, 0)
+                            formatter = stat_formatters.get(stat, str)
+                            formatted = formatter(value)
+                            row_parts.append(f"{formatted:<{col_widths[stat]}}")
+                        lines.append("".join(row_parts))
+                    lines.append("")
         else:
             # No role grouping
             lines.append(header)
             lines.append(separator)
-            for row in table_rows:
-                lines.append(build_row(row))
+            
+            for i, champ in enumerate(champ_data[:30], 1):  # Limit to top 30
+                row_parts = [f"{i}. {champ['champ'][:14]:<14}"]
+                for stat in stat_flags:
+                    value = champ.get(stat, 0)
+                    formatter = stat_formatters.get(stat, str)
+                    formatted = formatter(value)
+                    row_parts.append(f"{formatted:<{col_widths[stat]}}")
+                lines.append("".join(row_parts))
+        
+        top_table_min_width = max(len(header) + 8, 66)
+        lines = [line.ljust(top_table_min_width) if line else line for line in lines]
         
         # Add to embed
         result_text = "```\n" + "\n".join(lines) + "\n```"
