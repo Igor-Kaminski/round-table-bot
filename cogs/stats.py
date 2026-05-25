@@ -995,8 +995,8 @@ Shows champion statistics breakdown for a player.
                     row_parts.append(f"{formatted:<{col_widths[stat]}}")
                 lines.append("".join(row_parts))
         
-        top_table_min_width = max(len(header) + 8, 66)
-        lines = [line.ljust(top_table_min_width) if line else line for line in lines]
+        top_table_min_width = max(len(header) + 14, 72)
+        lines = [f"{line.ljust(top_table_min_width)}|" if line else line for line in lines]
         
         # Add to embed
         result_text = "```\n" + "\n".join(lines) + "\n```"
