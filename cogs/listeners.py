@@ -16,6 +16,9 @@ import easyocr
 import tempfile
 import os
 
+MATCH_DATA_COMMAND_RE = re.compile(r">>\s*match_data\s+(\d{9,12})", re.IGNORECASE)
+
+
 def parse_match_textbox(text):
     """Parses match scoreboard text into structured data."""
     print("\n--- [DEBUG] Starting to parse match textbox ---")
@@ -46,7 +49,9 @@ def parse_match_textbox(text):
 
     print(f"[DEBUG] Found {len(player_lines)} total player lines to process.")
 
-    # Team 1 is the first 5 players. Team 2 is everyone after. This is robust.
+    # PaladinsAssistant emits team 1 first, then team 2. If Hi-Rez omits rows,
+    # the match is marked incomplete later so these inferred teams are not used
+    # for stats or W/L calculations.
     for i, line in enumerate(player_lines):
         current_team = 1 if i < 5 else 2
         
@@ -86,11 +91,17 @@ def parse_match_textbox(text):
             print(f"--- [FATAL ERROR] An unexpected error occurred while parsing this line: {e}")
             raise ValueError(f"An unexpected error occurred on a player line. Please check its format. Error: {e}. Line: ```{line}```")
 
-    print(f"\n--- [DEBUG] Finished parsing. Total players found: {len(players)} ---")
+    player_count = len(players)
+    is_complete = player_count == 10
+    if not is_complete:
+        print(f"--- [WARNING] Incomplete match data: expected 10 players, got {player_count}.")
+
+    print(f"\n--- [DEBUG] Finished parsing. Total players found: {player_count} ---")
     return {
         "match_id": int(match_id), "time": int(time), "region": region,
         "map": map_name, "team1_score": int(team1_score),
         "team2_score": int(team2_score), "players": players,
+        "player_count": player_count, "is_complete": is_complete,
     }
 
 
@@ -98,6 +109,13 @@ class Listeners(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.reader = None
+
+    async def find_match_data_command_timestamp(self, channel, match_id, before_message):
+        async for message in channel.history(limit=100, before=before_message):
+            for match in MATCH_DATA_COMMAND_RE.finditer(message.content or ""):
+                if int(match.group(1)) == int(match_id):
+                    return int(message.created_at.timestamp())
+        return None
 
     async def scoreboard_ingestion(self, message):
         # --- FULLY AUTOMATED SCOREBOARD INGESTION ---
@@ -135,6 +153,11 @@ class Listeners(commands.Cog):
             try:
                 match_data = parse_match_textbox(cleaned_text)
                 match_id = match_data["match_id"]
+                registered_at = await self.find_match_data_command_timestamp(
+                    message.channel, match_id, message
+                )
+                if registered_at is not None:
+                    match_data["registered_at"] = registered_at
             except ValueError as e:
                 await message.channel.send(f"⚠️ **Could not parse scoreboard.**\n**Reason:** {e}")
                 return
@@ -161,11 +184,21 @@ class Listeners(commands.Cog):
                 await message.channel.send(warning_msg)
             # --- END OF MODIFIED BEHAVIOR ---
 
+            if not match_data.get("is_complete", True):
+                await message.channel.send(
+                    f"⚠️ **Match `{match_id}` is incomplete:** only "
+                    f"{match_data.get('player_count', len(match_data['players']))}/10 player rows were returned. "
+                    "It was saved and will still count in stats, but some team-total stats may be less reliable."
+                )
+
             # Step 5: Insert the data into the database regardless of link status
             insert_scoreboard(match_data, match_id)
 
             # Step 6: Send a public confirmation message
-            await message.channel.send(f"✅ **Match `{match_id}` successfully recorded.**")
+            if match_data.get("is_complete", True):
+                await message.channel.send(f"✅ **Match `{match_id}` successfully recorded.**")
+            else:
+                await message.channel.send(f"✅ **Match `{match_id}` recorded as incomplete.**")
             print(f"Successfully ingested match {match_id}.")
 
         # --- This part saves NeatQueue embeds for player verification ---

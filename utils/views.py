@@ -189,7 +189,15 @@ class QueueNumModal(Modal):
 
             # Insert the data directly.
             insert_scoreboard(match_data, int(queue_num))
-            await interaction.response.send_message(f"✅ Match {match_id} for queue {queue_num} successfully recorded.", ephemeral=True)
+            if match_data.get("is_complete", True):
+                await interaction.response.send_message(f"✅ Match {match_id} for queue {queue_num} successfully recorded.", ephemeral=True)
+            else:
+                await interaction.response.send_message(
+                    f"✅ Match {match_id} for queue {queue_num} recorded as incomplete "
+                    f"({match_data.get('player_count', len(match_data['players']))}/10 players). "
+                    "It will still count in stats, but some team-total stats may be less reliable.",
+                    ephemeral=True,
+                )
 
         except ValueError as ve:
             await interaction.response.send_message(f"Malformed match data: {ve}", ephemeral=True)

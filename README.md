@@ -61,13 +61,24 @@ The bot will automatically:
 ## Features
 
 ### For All Users
-- `!link <ign>` - Link your Discord account to your in-game name
-- `!stats [@user] [champion/role]` - View player statistics
-- `!top [@user]` - Interactive champion breakdown
-- `!history [@user] [limit]` - View recent match history
-- `!leaderboard [stat] [filters]` - View server player rankings
-- `!champ_lb [stat] [role] [filters]` - View champion rankings (all players combined)
-- `!compare @user1 [@user2]` - Compare two players
+Prefix commands (`!`) and slash commands (`/`) are both supported.
+
+- `!link <ign>` / `/link` - Link your Discord account to your in-game name
+- `!stats [@user] [champion/role] [filters]` / `/stats` - View player statistics
+- `!top [@user]` / `/top` - Interactive champion breakdown
+- `!history [@user] [limit] [filters]` / `/history` - View recent match history
+- `!leaderboard [stat] [filters]` / `/leaderboard` - View server player rankings
+- `!champ_lb [stat] [role] [filters]` / `/champ_lb` - View champion rankings (all players combined)
+- `!compare @user1 [@user2]` / `/compare` - Compare two players
+
+### Filters
+- Time: `last 3d`, `last 7d`, `last 14d`, `last 30d`, `since YYYY-MM-DD`, or `from YYYY-MM-DD to YYYY-MM-DD`
+- Match: `map <name>`, `wins`, `losses`, `team1`, `team2`, `4-3`, `close`, `stomp`, `sweep`
+- Players: `with <player>` or `against <player>`
+
+Time filters use when the bot recorded the match. Older matches from before this update may not have a recorded timestamp. Example: `!lb wr support last 7d map jaguar falls`.
+
+Incomplete match data from Hi-Rez/PaladinsAssistant is saved with `player_count` and `is_complete` metadata for audit/debugging. It still counts in normal stats and W/L calculations, but team-total stats can be less reliable when player rows are missing.
 
 ### For Admins
 - `!ingest_text` - Manually add match data

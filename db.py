@@ -1,6 +1,7 @@
 import json
 import re
 import sqlite3
+import time as time_module
 import unicodedata
 
 from core.constants import CHAMPION_ROLES, get_champions_for_role, resolve_champion_name
@@ -58,8 +59,15 @@ def _win_condition(player_alias):
 
 
 def _apply_match_filters(where_conditions, params, filters=None, player_alias="ps"):
-    if not filters:
-        return
+    filters = filters or {}
+
+    if filters.get("registered_after") is not None:
+        where_conditions.append("m.registered_at >= ?")
+        params.append(filters["registered_after"])
+
+    if filters.get("registered_before") is not None:
+        where_conditions.append("m.registered_at < ?")
+        params.append(filters["registered_before"])
 
     if filters.get("map"):
         where_conditions.append("m.map = ?")
@@ -138,7 +146,70 @@ def _find_player_row_by_ign(cursor, ign):
             return player_id, player_ign, discord_id, alts, False
     return None
 
-def create_database():
+
+def _refresh_match_completeness(cursor):
+    cursor.execute(
+        """
+        UPDATE matches
+        SET
+            player_count = (
+                SELECT COUNT(*)
+                FROM player_stats ps
+                WHERE ps.match_id = matches.match_id
+            ),
+            is_complete = CASE
+                WHEN (
+                    SELECT COUNT(*)
+                    FROM player_stats ps
+                    WHERE ps.match_id = matches.match_id
+                ) = 10
+                AND (
+                    SELECT COUNT(*)
+                    FROM player_stats ps
+                    WHERE ps.match_id = matches.match_id AND ps.team = 1
+                ) = 5
+                AND (
+                    SELECT COUNT(*)
+                    FROM player_stats ps
+                    WHERE ps.match_id = matches.match_id AND ps.team = 2
+                ) = 5
+                THEN 1 ELSE 0
+            END;
+        """
+    )
+
+
+def backfill_match_registered_at(match_timestamps):
+    """Backfill missing match registration timestamps from Discord history."""
+    if not match_timestamps:
+        return 0
+
+    conn = sqlite3.connect("match_data.db")
+    cursor = conn.cursor()
+    try:
+        updated = 0
+        for match_id, registered_at in match_timestamps.items():
+            cursor.execute(
+                """
+                UPDATE matches
+                SET registered_at = ?
+                WHERE match_id = ?
+                  AND registered_at IS NULL;
+                """,
+                (int(registered_at), int(match_id)),
+            )
+            updated += cursor.rowcount
+        conn.commit()
+        return updated
+    except sqlite3.Error as e:
+        print(f"Backfill registered_at failed: {e}")
+        conn.rollback()
+        return 0
+    finally:
+        conn.close()
+
+
+def create_database(match_registered_at=None):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     cursor.execute(
@@ -150,7 +221,10 @@ def create_database():
             region TEXT,
             map TEXT,
             team1_score INTEGER,
-            team2_score INTEGER
+            team2_score INTEGER,
+            registered_at INTEGER,
+            player_count INTEGER,
+            is_complete INTEGER DEFAULT 1
         );
         """
     )
@@ -195,6 +269,40 @@ def create_database():
             queue_num TEXT UNIQUE,
             embed_data TEXT
         );
+        """
+    )
+
+    cursor.execute("PRAGMA table_info(matches);")
+    match_columns = [row[1] for row in cursor.fetchall()]
+    if "registered_at" not in match_columns:
+        print("Adding 'registered_at' column to matches table...")
+        cursor.execute("ALTER TABLE matches ADD COLUMN registered_at INTEGER;")
+    if "player_count" not in match_columns:
+        print("Adding 'player_count' column to matches table...")
+        cursor.execute("ALTER TABLE matches ADD COLUMN player_count INTEGER;")
+    if "is_complete" not in match_columns:
+        print("Adding 'is_complete' column to matches table...")
+        cursor.execute("ALTER TABLE matches ADD COLUMN is_complete INTEGER DEFAULT 1;")
+    _refresh_match_completeness(cursor)
+    if match_registered_at:
+        updated = 0
+        for match_id, registered_at in match_registered_at.items():
+            cursor.execute(
+                """
+                UPDATE matches
+                SET registered_at = ?
+                WHERE match_id = ?
+                  AND registered_at IS NULL;
+                """,
+                (int(registered_at), int(match_id)),
+            )
+            updated += cursor.rowcount
+        if updated:
+            print(f"Backfilled registered_at for {updated} match rows.")
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_matches_registered_at
+        ON matches(registered_at);
         """
     )
 
@@ -291,6 +399,13 @@ def insert_scoreboard(scoreboard, queue_num):
         team1_score = scoreboard["team1_score"]
         team2_score = scoreboard["team2_score"]
         players = scoreboard["players"]
+        registered_at = int(scoreboard.get("registered_at") or time_module.time())
+        player_count = len(players)
+        is_complete = int(
+            player_count == 10
+            and sum(1 for player in players if player.get("team") == 1) == 5
+            and sum(1 for player in players if player.get("team") == 2) == 5
+        )
 
         cursor.execute("SELECT 1 FROM matches WHERE match_id = ?;", (match_id,))
         if cursor.fetchone():
@@ -299,10 +414,16 @@ def insert_scoreboard(scoreboard, queue_num):
 
         cursor.execute(
             """
-            INSERT INTO matches (match_id, time, region, map, team1_score, team2_score, queue_num)
-            VALUES (?, ?, ?, ?, ?, ?, ?);
+            INSERT INTO matches (
+                match_id, time, region, map, team1_score, team2_score, queue_num,
+                registered_at, player_count, is_complete
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
             """,
-            (match_id, time, region, map_name, team1_score, team2_score, queue_num),
+            (
+                match_id, time, region, map_name, team1_score, team2_score, queue_num,
+                registered_at, player_count, is_complete,
+            ),
         )
 
         for player in players:
@@ -346,7 +467,10 @@ def insert_scoreboard(scoreboard, queue_num):
                 ),
             )
         conn.commit()
-        print(f"Scoreboard for match_id {match_id} inserted successfully.")
+        if is_complete:
+            print(f"Scoreboard for match_id {match_id} inserted successfully.")
+        else:
+            print(f"Scoreboard for match_id {match_id} inserted as incomplete ({player_count}/10 players).")
     except sqlite3.Error as e:
         print(f"An error occurred: {e}")
         conn.rollback()
@@ -998,7 +1122,7 @@ def get_top_champs(player_id):
             SUM(damage), SUM(objective_time), SUM(shielding), SUM(healing), SUM(m.time)
         FROM player_stats ps
         JOIN matches m ON ps.match_id = m.match_id
-        WHERE player_id = ?
+            WHERE player_id = ?
         GROUP BY champ
         ORDER BY COUNT(*) DESC
         LIMIT 5
@@ -1038,7 +1162,9 @@ def get_winrate_with_against(pid1, pid2):
         FROM matches m
         JOIN player_stats ps1 ON m.match_id = ps1.match_id
         JOIN player_stats ps2 ON m.match_id = ps2.match_id
-        WHERE ps1.player_id = ? AND ps2.player_id = ? AND ps1.team = ps2.team
+        WHERE ps1.player_id = ?
+          AND ps2.player_id = ?
+          AND ps1.team = ps2.team
         """,
         (pid1, pid2),
     )
@@ -1053,7 +1179,9 @@ def get_winrate_with_against(pid1, pid2):
         FROM matches m
         JOIN player_stats ps1 ON m.match_id = ps1.match_id
         JOIN player_stats ps2 ON m.match_id = ps2.match_id
-        WHERE ps1.player_id = ? AND ps2.player_id = ? AND ps1.team != ps2.team
+        WHERE ps1.player_id = ?
+          AND ps2.player_id = ?
+          AND ps1.team != ps2.team
         """,
         (pid1, pid2),
     )
@@ -1088,10 +1216,16 @@ def compare_players(discord_id1, discord_id2):
     pid2 = get_player_id(discord_id2)
     return compare_by_player_ids(pid1, pid2)
 
-def get_match_history(player_id, limit: int = 30):
+def get_match_history(player_id, limit: int = 30, filters=None):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
     try:
+        where_conditions = ["ps.player_id = ?"]
+        params = [player_id]
+        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+        where_clause = " AND ".join(where_conditions)
+        params.append(limit)
+
         cursor.execute("""
             SELECT
                 m.map, ps.champ, ps.kills, ps.deaths, ps.assists,
@@ -1102,10 +1236,10 @@ def get_match_history(player_id, limit: int = 30):
                 m.match_id, m.time
             FROM player_stats ps
             JOIN matches m ON ps.match_id = m.match_id
-            WHERE ps.player_id = ?
-            ORDER BY ps.player_stats_id DESC
+            WHERE {where_clause}
+            ORDER BY m.registered_at DESC, ps.player_stats_id DESC
             LIMIT ?;
-        """, (player_id, limit))
+        """.format(where_clause=where_clause), params)
         return cursor.fetchall()
     finally:
         conn.close()
@@ -1487,6 +1621,7 @@ def migrate_team_column():
                     "UPDATE player_stats SET team = ? WHERE player_stats_id = ?;",
                     (team, ps_id),
                 )
+        _refresh_match_completeness(cursor)
         conn.commit()
         print("Migration: Populated 'team' column in player_stats.")
     except Exception as e:

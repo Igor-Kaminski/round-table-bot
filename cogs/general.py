@@ -1,6 +1,7 @@
 # cogs/general.py
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 from db import (
     get_ign_link_info,
@@ -12,6 +13,23 @@ from db import (
 )
 from utils.checks import is_exec
 from utils.views import LinkConfirmView
+
+
+class SlashContext:
+    def __init__(self, interaction: discord.Interaction):
+        self.interaction = interaction
+        self.author = interaction.user
+        self.user = interaction.user
+        self.guild = interaction.guild
+        self.channel = interaction.channel
+        self.bot = interaction.client
+        self.message = getattr(interaction, "message", None)
+
+    async def send(self, content=None, **kwargs):
+        kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        if self.interaction.response.is_done():
+            return await self.interaction.followup.send(content=content, **kwargs)
+        return await self.interaction.response.send_message(content=content, **kwargs)
 
 
 class General(commands.Cog):
@@ -75,6 +93,11 @@ class General(commands.Cog):
         except Exception as e:
             print(f"Error in link command: {e}")
             await ctx.send("An error occurred while linking your account.")
+
+    @app_commands.command(name="link", description="Link your Discord account to an in-game name.")
+    @app_commands.describe(ign="Your in-game name.")
+    async def link_slash(self, interaction: discord.Interaction, ign: str):
+        await self.link.callback(self, SlashContext(interaction), ign)
 
     @commands.command(
         name="add_alt",
@@ -157,6 +180,12 @@ class General(commands.Cog):
         else:
             await ctx.send(f"❌ Failed to add alt IGN `{alt_ign}`. Please contact an exec.")
 
+    @app_commands.command(name="add_alt", description="Add an alternate in-game name.")
+    @app_commands.describe(alt_ign="Alternate in-game name.", user="Optional target user for execs.")
+    async def add_alt_slash(self, interaction: discord.Interaction, alt_ign: str, user: discord.Member = None):
+        raw = f"{user.mention} {alt_ign}" if user else alt_ign
+        await self.add_alt_cmd.callback(self, SlashContext(interaction), raw=raw)
+
     @commands.command(
         name="alts",
         aliases=["my_alts"],
@@ -219,6 +248,12 @@ class General(commands.Cog):
         )
         await ctx.send(embed=embed)
 
+    @app_commands.command(name="alts", description="Show a player's linked in-game names.")
+    @app_commands.describe(user="Optional Discord member.", player="Optional IGN.")
+    async def alts_slash(self, interaction: discord.Interaction, user: discord.Member = None, player: str = None):
+        target = user.mention if user else player
+        await self.alts_cmd.callback(self, SlashContext(interaction), target=target)
+
     @commands.command(
         name="unlink",
         help=(
@@ -245,6 +280,10 @@ class General(commands.Cog):
         except Exception as e:
             print(f"Error in unlink command: {e}")
             await ctx.send("An error occurred while unlinking your account.")
+
+    @app_commands.command(name="unlink", description="Unlink your Discord account from your IGN.")
+    async def unlink_slash(self, interaction: discord.Interaction):
+        await self.unlink.callback(self, SlashContext(interaction))
 
 
 async def setup(bot):

@@ -1,6 +1,7 @@
 # cogs/admin.py
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 import io
 import re
@@ -21,9 +22,35 @@ from db import (
 )
 
 
+class SlashContext:
+    def __init__(self, interaction: discord.Interaction):
+        self.interaction = interaction
+        self.author = interaction.user
+        self.user = interaction.user
+        self.guild = interaction.guild
+        self.channel = interaction.channel
+        self.bot = interaction.client
+        self.message = getattr(interaction, "message", None)
+
+    async def send(self, content=None, **kwargs):
+        kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        if self.interaction.response.is_done():
+            return await self.interaction.followup.send(content=content, **kwargs)
+        return await self.interaction.response.send_message(content=content, **kwargs)
+
+
 class Admin(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+
+    async def _slash_exec_ctx(self, interaction):
+        ctx = SlashContext(interaction)
+        if not is_exec(ctx):
+            await interaction.response.send_message("You do not have the required permissions to run this command.", ephemeral=True)
+            return None
+        if not interaction.response.is_done():
+            await interaction.response.defer(ephemeral=True)
+        return ctx
 
     @commands.command(name="link_disc", help="Update a player's Discord ID. Only for Executives.")
     @commands.check(is_exec)
@@ -34,6 +61,12 @@ class Admin(commands.Cog):
         except Exception as e:
             print(f"Error in link_disc command: {e}")
             await ctx.send(f"An error occurred while updating the Discord ID: {e}")
+
+    @app_commands.command(name="link_disc", description="Exec: update a player's Discord ID.")
+    async def link_disc_slash(self, interaction: discord.Interaction, old_id: str, new_id: str):
+        ctx = await self._slash_exec_ctx(interaction)
+        if ctx:
+            await self.link_disc.callback(self, ctx, old_id, new_id)
 
     @commands.command(name="query", help="Execute a SELECT SQL query. Only for Executives.")
     @commands.check(is_exec)
@@ -51,6 +84,12 @@ class Admin(commands.Cog):
         except Exception as e:
             print(f"Error in query command: {e}")
             await ctx.send(f"An error occurred while executing the query: {e}")
+
+    @app_commands.command(name="query", description="Exec: execute a SELECT SQL query.")
+    async def query_slash(self, interaction: discord.Interaction, sql_query: str):
+        ctx = await self._slash_exec_ctx(interaction)
+        if ctx:
+            await self.query.callback(self, ctx, sql_query=sql_query)
 
     @commands.command(name="fetch_embeds", help="Fetch messages and store embeds in the database.")
     @commands.check(is_exec)
@@ -77,6 +116,12 @@ class Admin(commands.Cog):
             print(f"Error in fetch_embeds command: {e}")
             await ctx.send("An error occurred while fetching embeds.")
 
+    @app_commands.command(name="fetch_embeds", description="Exec: fetch messages and store queue embeds.")
+    async def fetch_embeds_slash(self, interaction: discord.Interaction):
+        ctx = await self._slash_exec_ctx(interaction)
+        if ctx:
+            await self.fetch_embeds.callback(self, ctx)
+
     @commands.command(
         name="show_alts",
         help="Show all alternate IGNs for a player. Execs only. (Users can see their own with `!alts`.)",
@@ -88,6 +133,12 @@ class Admin(commands.Cog):
             await ctx.send(f"Alternate IGNs for {user.mention}: `{', '.join(alt_igns)}`")
         else:
             await ctx.send(f"No alternate IGNs found for {user.mention}.")
+
+    @app_commands.command(name="show_alts", description="Exec: show all alternate IGNs for a player.")
+    async def show_alts_slash(self, interaction: discord.Interaction, user: discord.Member):
+        ctx = await self._slash_exec_ctx(interaction)
+        if ctx:
+            await self.show_alt_igns_cmd.callback(self, ctx, user)
 
     @commands.command(
         name="delete_alt",
@@ -101,6 +152,12 @@ class Admin(commands.Cog):
         else:
             await ctx.send(f"Failed to delete alt IGN `{alt_ign}` for {user.mention}. It may not exist.")
 
+    @app_commands.command(name="delete_alt", description="Exec: delete an alternate IGN for a player.")
+    async def delete_alt_slash(self, interaction: discord.Interaction, user: discord.Member, alt_ign: str):
+        ctx = await self._slash_exec_ctx(interaction)
+        if ctx:
+            await self.delete_alt_ign_cmd.callback(self, ctx, user, alt_ign=alt_ign)
+
     @commands.command(name="player_id", help="Get player_id for a Discord ID. Execs only.")
     @commands.check(is_exec)
     async def player_id_cmd(self, ctx, user: discord.Member):
@@ -109,6 +166,12 @@ class Admin(commands.Cog):
             await ctx.send(f"player_id for {user.display_name}: `{pid}`")
         else:
             await ctx.send(f"No player found for {user.display_name}.")
+
+    @app_commands.command(name="player_id", description="Exec: get player_id for a Discord member.")
+    async def player_id_slash(self, interaction: discord.Interaction, user: discord.Member):
+        ctx = await self._slash_exec_ctx(interaction)
+        if ctx:
+            await self.player_id_cmd.callback(self, ctx, user)
 
     @commands.command(name="old_stats", help="[LEGACY] Get raw stats for a Discord ID. Execs only.")
     @commands.check(is_exec)
@@ -140,6 +203,12 @@ class Admin(commands.Cog):
             f"Games: {stats['games']}"
         )
         await ctx.send(msg)
+
+    @app_commands.command(name="old_stats", description="Exec: get legacy raw stats for a Discord ID.")
+    async def old_stats_slash(self, interaction: discord.Interaction, discord_id: str):
+        ctx = await self._slash_exec_ctx(interaction)
+        if ctx:
+            await self.old_stats_cmd.callback(self, ctx, discord_id)
 
     @commands.command(name="ingest_text", help="Parse and insert a scoreboard from text. Execs only.")
     @commands.check(is_exec)
@@ -191,13 +260,26 @@ class Admin(commands.Cog):
                 return
 
             insert_scoreboard(match_data, queue_value)
-            await ctx.send(f"Match {match_id} for queue {queue_value} successfully recorded.")
+            if match_data.get("is_complete", True):
+                await ctx.send(f"Match {match_id} for queue {queue_value} successfully recorded.")
+            else:
+                await ctx.send(
+                    f"Match {match_id} for queue {queue_value} recorded as incomplete "
+                    f"({match_data.get('player_count', len(match_data['players']))}/10 players). "
+                    "It will still count in stats, but some team-total stats may be less reliable."
+                )
             
         except ValueError as ve:
             await ctx.send(f"Malformed match data: {ve}")
         except Exception as e:
             print(f"Error in ingest_text: {e}")
             await ctx.send(f"Error processing match data: {e}")
+
+    @app_commands.command(name="ingest_text", description="Exec: parse and insert a scoreboard from text.")
+    async def ingest_text_slash(self, interaction: discord.Interaction, queue_num: str, scoreboard_text: str):
+        ctx = await self._slash_exec_ctx(interaction)
+        if ctx:
+            await self.ingest_text_cmd.callback(self, ctx, queue_num, scoreboard_text=scoreboard_text)
 
     @commands.command(name="delete_match", help="Permanently delete a match by its ID. Execs only.")
     @commands.check(is_exec)
@@ -217,6 +299,12 @@ class Admin(commands.Cog):
         except Exception as e:
             print(f"Error in delete_match command: {e}")
             await ctx.send(f"An unexpected error occurred while trying to delete Match ID `{match_id}`.")
+
+    @app_commands.command(name="delete_match", description="Exec: permanently delete a match by ID.")
+    async def delete_match_slash(self, interaction: discord.Interaction, match_id: int):
+        ctx = await self._slash_exec_ctx(interaction)
+        if ctx:
+            await self.delete_match_cmd.callback(self, ctx, match_id)
 
 
 async def setup(bot):

@@ -1,10 +1,13 @@
 # cogs/stats.py
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 import os
 import re
 import time
+from datetime import datetime, timedelta
+from typing import Literal
 from utils.converters import PlayerConverter, resolve_player_id
 from utils.views import TopChampsView
 from core.constants import CHAMPION_ROLES, get_champions_for_role, resolve_champion_name, resolve_role_name
@@ -23,6 +26,31 @@ from db import (
     get_top_champs,
     resolve_map_name,
 )
+
+
+TimeRange = Literal["3d", "7d", "14d", "30d"]
+ResultFilter = Literal["wins", "losses"]
+TeamFilter = Literal["team1", "team2"]
+ScoreFilter = Literal["4-3", "close", "stomp", "sweep"]
+
+
+class SlashContext:
+    """Small adapter so slash commands can reuse existing prefix command handlers."""
+
+    def __init__(self, interaction: discord.Interaction):
+        self.interaction = interaction
+        self.author = interaction.user
+        self.user = interaction.user
+        self.guild = interaction.guild
+        self.channel = interaction.channel
+        self.bot = interaction.client
+        self.message = getattr(interaction, "message", None)
+
+    async def send(self, content=None, **kwargs):
+        kwargs = {key: value for key, value in kwargs.items() if value is not None}
+        if self.interaction.response.is_done():
+            return await self.interaction.followup.send(content=content, **kwargs)
+        return await self.interaction.response.send_message(content=content, **kwargs)
 
 
 def _is_unlinked(target_user):
@@ -58,8 +86,13 @@ SCORE_FILTER_ALIASES = {
     "sweep": "sweep", "sweeps": "sweep",
 }
 
+TIME_FILTER_KEYWORDS = {
+    "time", "last", "since", "after", "from", "between", "before", "until",
+}
+
 FILTER_KEYWORDS = {
     "map", "with", "against",
+    *TIME_FILTER_KEYWORDS,
     *RESULT_FILTER_ALIASES.keys(),
     *TEAM_FILTER_ALIASES.keys(),
     *SCORE_FILTER_ALIASES.keys(),
@@ -79,11 +112,80 @@ def _parse_scoreline(arg):
     return None
 
 
+def _parse_period_token(arg):
+    key = _compact_arg(arg)
+    match = re.fullmatch(r"(\d+)(d|day|days|w|week|weeks|h|hour|hours)", key)
+    if not match:
+        return None
+
+    amount = int(match.group(1))
+    unit = match.group(2)
+    if amount <= 0:
+        return None
+
+    if unit.startswith("h"):
+        seconds = amount * 60 * 60
+        label_unit = "hour" if amount == 1 else "hours"
+    elif unit.startswith("w"):
+        seconds = amount * 7 * 24 * 60 * 60
+        label_unit = "week" if amount == 1 else "weeks"
+    else:
+        seconds = amount * 24 * 60 * 60
+        label_unit = "day" if amount == 1 else "days"
+    return seconds, f"last {amount} {label_unit}"
+
+
+def _parse_split_period(args, index):
+    if index >= len(args):
+        return None
+    parsed = _parse_period_token(args[index])
+    if parsed:
+        return parsed, index + 1
+    if index + 1 < len(args) and str(args[index]).isdigit():
+        parsed = _parse_period_token(f"{args[index]}{args[index + 1]}")
+        if parsed:
+            return parsed, index + 2
+    return None
+
+
+def _parse_date_start(arg):
+    value = str(arg).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            return int(datetime.strptime(value, fmt).timestamp())
+        except ValueError:
+            continue
+    return None
+
+
+def _parse_date_end(arg):
+    value = str(arg).strip()
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d"):
+        try:
+            end_of_day = datetime.strptime(value, fmt) + timedelta(days=1)
+            return int(end_of_day.timestamp())
+        except ValueError:
+            continue
+    return None
+
+
+def _date_filter_error(arg):
+    return f"`{arg}` is not a valid date. Use `YYYY-MM-DD`, for example `2026-05-25`."
+
+
+def _set_last_registered_filter(filters, seconds, label):
+    filters["registered_after"] = int(time.time()) - seconds
+    filters.pop("registered_before", None)
+    filters["time_label"] = f"Recorded {label}"
+
+
 def _filter_summary(filters):
     if not filters:
         return []
 
     labels = []
+    if filters.get("time_label"):
+        labels.append(filters["time_label"])
     if filters.get("map"):
         labels.append(f"Map: {filters['map']}")
     if filters.get("result") == "wins":
@@ -111,6 +213,8 @@ def _filter_summary(filters):
 
 def _title_filter_suffix(filters):
     parts = []
+    if filters.get("time_label"):
+        parts.append(f"({filters['time_label']})")
     if filters.get("map"):
         parts.append(f"on {filters['map']}")
     if filters.get("result") == "wins":
@@ -136,6 +240,54 @@ def _title_filter_suffix(filters):
     return " " + " ".join(parts) if parts else ""
 
 
+def _slash_filter_args(
+    *,
+    time_range=None,
+    since=None,
+    until=None,
+    map_name=None,
+    result=None,
+    team=None,
+    score=None,
+    with_player=None,
+    against_player=None,
+):
+    args = []
+    if time_range:
+        args.extend(["last", time_range])
+    elif since and until:
+        args.extend(["from", since, "to", until])
+    elif since:
+        args.extend(["since", since])
+    elif until:
+        args.extend(["until", until])
+
+    if map_name:
+        args.extend(["map", map_name])
+    if result:
+        args.append(result)
+    if team:
+        args.append(team)
+    if score:
+        args.append(score)
+    if with_player:
+        args.extend(["with", str(with_player.id)])
+    if against_player:
+        args.extend(["against", str(against_player.id)])
+    return args
+
+
+def _split_words(value):
+    return str(value).split() if value else []
+
+
+def _stat_flag(value):
+    if not value:
+        return None
+    value = value.strip().lower()
+    return value if value.startswith("-") else f"-{value}"
+
+
 async def _extract_match_filters(ctx, args):
     args = list(args)
     filters = {}
@@ -146,6 +298,78 @@ async def _extract_match_filters(ctx, args):
         arg = str(args[i])
         raw_key = arg.lower()
         key = _compact_arg(arg)
+
+        standalone_period = _parse_period_token(arg)
+        if standalone_period:
+            seconds, label = standalone_period
+            _set_last_registered_filter(filters, seconds, label)
+            i += 1
+            continue
+
+        if key in {"time", "last"}:
+            period = _parse_split_period(args, i + 1)
+            if not period:
+                return remaining, filters, f"`{arg}` needs a period like `3d`, `7d`, `14d`, or `30d`."
+            (seconds, label), consumed_until = period
+            _set_last_registered_filter(filters, seconds, label)
+            i = consumed_until
+            continue
+
+        if key in {"since", "after"}:
+            if i + 1 >= len(args):
+                return remaining, filters, f"`{arg}` needs a date like `2026-05-25` or a period like `7d`."
+            period = _parse_split_period(args, i + 1)
+            if period:
+                (seconds, label), consumed_until = period
+                _set_last_registered_filter(filters, seconds, label)
+                i = consumed_until
+                continue
+            start_ts = _parse_date_start(args[i + 1])
+            if start_ts is None:
+                return remaining, filters, _date_filter_error(args[i + 1])
+            filters["registered_after"] = start_ts
+            filters.pop("registered_before", None)
+            filters["time_label"] = f"Recorded since {args[i + 1]}"
+            i += 2
+            continue
+
+        if key in {"before", "until"}:
+            if i + 1 >= len(args):
+                return remaining, filters, f"`{arg}` needs a date like `2026-05-25`."
+            end_ts = _parse_date_end(args[i + 1])
+            if end_ts is None:
+                return remaining, filters, _date_filter_error(args[i + 1])
+            filters["registered_before"] = end_ts
+            if filters.get("time_label", "").startswith("Recorded since "):
+                filters["time_label"] = f"{filters['time_label']} until {args[i + 1]}"
+            else:
+                filters["time_label"] = f"Recorded before {args[i + 1]}"
+            i += 2
+            continue
+
+        if key in {"from", "between"}:
+            if i + 2 >= len(args):
+                return remaining, filters, f"`{arg}` needs a start and end date, like `from 2026-05-01 to 2026-05-25`."
+            start_arg = args[i + 1]
+            end_index = i + 2
+            if _compact_arg(args[end_index]) in {"to", "and"} or str(args[end_index]) == "-":
+                end_index += 1
+            if end_index >= len(args):
+                return remaining, filters, f"`{arg}` needs an end date."
+            end_arg = args[end_index]
+            start_ts = _parse_date_start(start_arg)
+            end_ts = _parse_date_end(end_arg)
+            if start_ts is None:
+                return remaining, filters, _date_filter_error(start_arg)
+            if end_ts is None:
+                return remaining, filters, _date_filter_error(end_arg)
+            if start_ts >= end_ts:
+                return remaining, filters, "`from` date must be before the `to` date."
+            filters["registered_after"] = start_ts
+            filters["registered_before"] = end_ts
+            filters["time_label"] = f"Recorded {start_arg} to {end_arg}"
+            i = end_index + 1
+            continue
 
         if key == "map":
             resolved_map = None
@@ -259,6 +483,17 @@ class Stats(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    def _slash_ctx(self, interaction):
+        return SlashContext(interaction)
+
+    async def _slash_target(self, interaction, member=None, player=None, default_to_author=True):
+        ctx = self._slash_ctx(interaction)
+        if member:
+            return member
+        if player:
+            return await PlayerConverter().convert(ctx, player)
+        return interaction.user if default_to_author else None
+
     def _examples_embed(self, topic=None):
         topic_key = _compact_arg(topic or "overview")
         topic_titles = {
@@ -305,6 +540,7 @@ class Stats(commands.Cog):
                 "`!stats me ying map jaguar falls` - Ying stats on Jaguar Falls.",
                 "`!stats me fernando team2` - Fernando stats on Team 2.",
                 "`!stats me moji 4-3` - Moji stats in games ending 4-3.",
+                "`!stats me support last 7d` - Your support stats from matches recorded in the last 7 days.",
                 "`!stats me barik with lulub against nozy` - Barik stats with lulub against nozy.",
             ],
             "top": [
@@ -317,6 +553,7 @@ class Stats(commands.Cog):
                 "`!top me barik map jaguar falls` - Barik on Jaguar Falls.",
                 "`!top me nyx team1` - Nyx on Team 1.",
                 "`!top me ash losses` - Ash in losses only.",
+                "`!top me support 14d` - Support champion table from matches recorded in the last 14 days.",
                 "`!top me fernando 4-3 with pjamo` - Fernando in 4-3 games with pjamo.",
             ],
             "leaderboard": [
@@ -328,6 +565,7 @@ class Stats(commands.Cog):
                 "`!lb wr inara 4-3` - Inara WR in 4-3 games.",
                 "`!lb wr ash against nozy` - Ash WR against nozy.",
                 "`!lb dmg bk wins` - Bomb King damage/min in wins.",
+                "`!lb wr support last 30d` - Support WR leaderboard from recently recorded matches.",
                 "`!lb wr point tank map jaguar falls` - Point tank WR on Jaguar Falls.",
                 "`!lb wr off tank losses with lulub` - Off tank WR in losses with lulub.",
             ],
@@ -340,6 +578,7 @@ class Stats(commands.Cog):
                 "`!clb kp close` - Champion KP in close games.",
                 "`!clb wr flank losses` - Flank champion WR in losses.",
                 "`!clb dmg damage team2 stomp` - Damage champion damage/min on Team 2 in stomps.",
+                "`!clb wr support from 2026-05-01 to 2026-05-25` - Support champion WR in a custom recorded range.",
                 "`!clb wr support against nozy` - Support champion WR against nozy.",
                 "`!clb wr point tank map stone keep night` - Point tank WR on Stone Keep Night.",
             ],
@@ -445,7 +684,42 @@ class Stats(commands.Cog):
             description="Use `!examples stats`, `!examples lb`, `!examples mapwr`, `!examples champcompare`, or `!examples filters` for focused examples.",
             color=discord.Color.green(),
         )
-        embed.add_field(name="Examples", value="\n".join(examples_by_topic[topic_key]), inline=False)
+        if topic_key == "filters":
+            embed.description = (
+                "Add these after any stats command. Time filters use when the match was recorded by the bot; "
+                "older matches from before this update may not have a recorded timestamp."
+            )
+            embed.add_field(
+                name="Time",
+                value=(
+                    "`last 3d` / `last 7d` / `last 14d` / `last 30d` - recent recorded matches.\n"
+                    "`time 7d` or just `7d` - short form for a recent window.\n"
+                    "`since 2026-05-01` - recorded on or after a date.\n"
+                    "`from 2026-05-01 to 2026-05-25` - custom date range."
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Match",
+                value=(
+                    "`map <name>` - map only, e.g. `map jaguar falls`.\n"
+                    "`wins` / `losses` - result only.\n"
+                    "`team1` / `team2` - draft side.\n"
+                    "`4-3`, `close`, `stomp`, `sweep` - score filters."
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Players",
+                value=(
+                    "`with <player>` - same team as that player.\n"
+                    "`against <player>` - enemy team against that player.\n"
+                    "Example: `!lb wr barik last 7d map brightmarsh with pjamo`."
+                ),
+                inline=False,
+            )
+        else:
+            embed.add_field(name="Examples", value="\n".join(examples_by_topic[topic_key]), inline=False)
         return embed
 
     @commands.command(
@@ -459,6 +733,11 @@ class Stats(commands.Cog):
     async def examples_cmd(self, ctx, *, topic: str = None):
         await ctx.send(embed=self._examples_embed(topic))
 
+    @app_commands.command(name="examples", description="Show useful command examples.")
+    @app_commands.describe(topic="Optional topic: stats, top, lb, clb, mapwr, champmapwr, filters, aliases")
+    async def examples_slash(self, interaction: discord.Interaction, topic: str = None):
+        await interaction.response.send_message(embed=self._examples_embed(topic))
+
     @commands.command(
         name="filters",
         aliases=["filter"],
@@ -466,6 +745,10 @@ class Stats(commands.Cog):
     )
     async def filters_cmd(self, ctx):
         await ctx.send(embed=self._examples_embed("filters"))
+
+    @app_commands.command(name="filters", description="Show available match filters.")
+    async def filters_slash(self, interaction: discord.Interaction):
+        await interaction.response.send_message(embed=self._examples_embed("filters"))
 
     @commands.command(
         name="stats",
@@ -475,13 +758,14 @@ class Stats(commands.Cog):
             "The user argument accepts a mention, Discord ID, `me`, a username, "
             "a main IGN, an alt IGN, or even an unlinked IGN (match history only).\n"
             "Roles: `damage`, `flank`, `support`, `tank`, `point tank`, `off tank`.\n"
-            "Filters: `map <name>`, `wins`, `losses`, `team1/team2`, `4-3`, `close`, "
-            "`stomp`, `sweep`, `with <player>`, `against <player>`.\n"
+            "Filters: time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), map, "
+            "result, team, score, with/against player.\n"
             "Examples:\n"
             "- `!stats me`\n"
             "- `!stats me support`\n"
             "- `!stats @user moji`\n"
             "- `!stats pjamo damba wins`\n"
+            "- `!stats me support last 7d`\n"
             "- `!stats me tank map jaguar falls`\n"
             "- `!stats me support team1`\n"
             "- `!stats me moji losses 4-3`\n"
@@ -677,6 +961,56 @@ class Stats(commands.Cog):
 
         await ctx.send(embed=embed, file=icon_file)
 
+    @app_commands.command(name="stats", description="Get player stats with structured filters.")
+    @app_commands.describe(
+        user="Discord member to view. Leave empty for yourself.",
+        player="IGN or Discord ID, useful for unlinked players.",
+        role_or_champion="Role or champion, e.g. support, point tank, damba.",
+        time_range="Matches recorded in the last N days.",
+        since="Custom start date: YYYY-MM-DD.",
+        until="Custom end date: YYYY-MM-DD.",
+        map_name="Map name, e.g. Jaguar Falls.",
+        result="Wins or losses only.",
+        team="Draft side/team filter.",
+        score="Score filter.",
+        with_player="Only matches on the same team as this member.",
+        against_player="Only matches against this member.",
+    )
+    async def stats_slash(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member = None,
+        player: str = None,
+        role_or_champion: str = None,
+        time_range: TimeRange = None,
+        since: str = None,
+        until: str = None,
+        map_name: str = None,
+        result: ResultFilter = None,
+        team: TeamFilter = None,
+        score: ScoreFilter = None,
+        with_player: discord.Member = None,
+        against_player: discord.Member = None,
+    ):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        try:
+            target_user = await self._slash_target(interaction, user, player)
+            args = _split_words(role_or_champion) + _slash_filter_args(
+                time_range=time_range,
+                since=since,
+                until=until,
+                map_name=map_name,
+                result=result,
+                team=team,
+                score=score,
+                with_player=with_player,
+                against_player=against_player,
+            )
+            await self.stats_cmd.callback(self, ctx, target_user, filter_str=" ".join(args) or None)
+        except commands.BadArgument as exc:
+            await ctx.send(str(exc))
+
     TOP_HELP = """
 Shows champion statistics breakdown for a player.
 
@@ -687,7 +1021,7 @@ Shows champion statistics breakdown for a player.
 - `[-stat]`: Stats to display (e.g., `-kpm -dmg_share -kda`)
 - `[role/champion]`: Filter by role (`damage`, `flank`, `support`, `tank`, `point tank`, `off tank`) or champion name
 - `[-m <games>]`: Minimum games filter (default: 1)
-- `[filters]`: `map <name>`, `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `with <player>`, `against <player>`
+- `[filters]`: time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
 
 **Available Stats:**
 - `-wr` or `-winrate`: Winrate percentage
@@ -1048,20 +1382,85 @@ Shows champion statistics breakdown for a player.
         
         await ctx.send(embed=embed)
 
+    @app_commands.command(name="top", description="Show a player's champion table with structured filters.")
+    @app_commands.describe(
+        user="Discord member to view. Leave empty for yourself.",
+        player="IGN or Discord ID, useful for unlinked players.",
+        columns="Comma/space-separated stat columns, e.g. wr kp dmg.",
+        role_or_champion="Optional role or champion filter.",
+        min_games="Minimum games per champion.",
+        time_range="Matches recorded in the last N days.",
+        since="Custom start date: YYYY-MM-DD.",
+        until="Custom end date: YYYY-MM-DD.",
+        map_name="Map name.",
+        result="Wins or losses only.",
+        team="Draft side/team filter.",
+        score="Score filter.",
+        with_player="Only matches on the same team as this member.",
+        against_player="Only matches against this member.",
+    )
+    async def top_slash(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member = None,
+        player: str = None,
+        columns: str = None,
+        role_or_champion: str = None,
+        min_games: int = 1,
+        time_range: TimeRange = None,
+        since: str = None,
+        until: str = None,
+        map_name: str = None,
+        result: ResultFilter = None,
+        team: TeamFilter = None,
+        score: ScoreFilter = None,
+        with_player: discord.Member = None,
+        against_player: discord.Member = None,
+    ):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        try:
+            target_user = await self._slash_target(interaction, user, player)
+            args = [str(target_user.id)] if getattr(target_user, "id", None) else [target_user.display_name]
+            if columns:
+                args.extend(_stat_flag(part) for part in re.split(r"[\s,]+", columns) if part.strip())
+            args.extend(_split_words(role_or_champion))
+            if min_games and min_games > 1:
+                args.extend(["-m", str(min_games)])
+            args.extend(_slash_filter_args(
+                time_range=time_range,
+                since=since,
+                until=until,
+                map_name=map_name,
+                result=result,
+                team=team,
+                score=score,
+                with_player=with_player,
+                against_player=against_player,
+            ))
+            await self.top_cmd.callback(self, ctx, *args)
+        except commands.BadArgument as exc:
+            await ctx.send(str(exc))
+
     @commands.command(
         name="history",
         help=(
             "Show recent matches for a player (max 20).\n"
-            "Usage: `!history [user|ign] [count]`\n"
+            "Usage: `!history [user|ign] [count] [filters]`\n"
             "Examples:\n"
             "- `!history`\n"
             "- `!history 10`\n"
             "- `!history @user 5`\n"
-            "- `!history pjamo 8`\n"
+            "- `!history pjamo 8 last 7d`\n"
             "- `!history Fúriä 20`"
         ),
     )
     async def history_cmd(self, ctx, *args):
+        args, match_filters, filter_error = await _extract_match_filters(ctx, args)
+        if filter_error:
+            await ctx.send(filter_error)
+            return
+
         target_user = ctx.author
         limit = 20  # Default to 20
         user_input_parts = []
@@ -1090,7 +1489,7 @@ Shows champion statistics breakdown for a player.
             )
             return
 
-        history = get_match_history(player_id, limit)
+        history = get_match_history(player_id, limit, filters=match_filters)
         if not history:
             await ctx.send(f"No match history found for {target_user.display_name}.")
             return
@@ -1109,8 +1508,64 @@ Shows champion statistics breakdown for a player.
             line = f"{symbol:<4} {champ_str:<16} {time_str:<6} {match_id:<10} {kda_ratio:<6} {raw_kda_str:<11} {map_str:<20}"
             lines.append(line)
 
-        output = f"Last {len(history)} Matches for {target_user.display_name}\n\n" + "\n".join(lines)
+        filter_text = ""
+        active_filters = _filter_summary(match_filters)
+        if active_filters:
+            filter_text = " (" + "; ".join(active_filters) + ")"
+        output = f"Last {len(history)} Matches for {target_user.display_name}{filter_text}\n\n" + "\n".join(lines)
         await ctx.send(f"```diff\n{output}\n```")
+
+    @app_commands.command(name="history", description="Show recent matches with structured filters.")
+    @app_commands.describe(
+        user="Discord member to view. Leave empty for yourself.",
+        player="IGN or Discord ID, useful for unlinked players.",
+        count="Number of matches to show, max 20.",
+        time_range="Matches recorded in the last N days.",
+        since="Custom start date: YYYY-MM-DD.",
+        until="Custom end date: YYYY-MM-DD.",
+        map_name="Map name.",
+        result="Wins or losses only.",
+        team="Draft side/team filter.",
+        score="Score filter.",
+        with_player="Only matches on the same team as this member.",
+        against_player="Only matches against this member.",
+    )
+    async def history_slash(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member = None,
+        player: str = None,
+        count: int = 20,
+        time_range: TimeRange = None,
+        since: str = None,
+        until: str = None,
+        map_name: str = None,
+        result: ResultFilter = None,
+        team: TeamFilter = None,
+        score: ScoreFilter = None,
+        with_player: discord.Member = None,
+        against_player: discord.Member = None,
+    ):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        try:
+            target_user = await self._slash_target(interaction, user, player)
+            args = [str(target_user.id)] if getattr(target_user, "id", None) else [target_user.display_name]
+            args.append(str(count))
+            args.extend(_slash_filter_args(
+                time_range=time_range,
+                since=since,
+                until=until,
+                map_name=map_name,
+                result=result,
+                team=team,
+                score=score,
+                with_player=with_player,
+                against_player=against_player,
+            ))
+            await self.history_cmd.callback(self, ctx, *args)
+        except commands.BadArgument as exc:
+            await ctx.send(str(exc))
 
     MAP_WINRATES_HELP = """
 Show a player's winrate on every map, with optional role/champion filters.
@@ -1118,7 +1573,7 @@ Show a player's winrate on every map, with optional role/champion filters.
 **Usage:** `!mapwr [user|ign] [champion|role] [-m <games>] [-wr] [filters]`
 
 **Roles:** `damage`, `flank`, `support`, `tank`, `point tank`, `off tank`
-**Filters:** `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `with <player>`, `against <player>`
+**Filters:** time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), result, team, score, with/against player
 
 **Examples:**
 - `!mapwr` - Your map winrates.
@@ -1244,12 +1699,69 @@ Show a player's winrate on every map, with optional role/champion filters.
             embed.set_footer(text=" • ".join(footer_parts))
         await ctx.send(embed=embed, file=icon_file)
 
+    @app_commands.command(name="mapwr", description="Show a player's winrate on every map.")
+    @app_commands.describe(
+        user="Discord member to view. Leave empty for yourself.",
+        player="IGN or Discord ID, useful for unlinked players.",
+        role_or_champion="Optional role or champion filter.",
+        min_games="Minimum games per map.",
+        sort_by_winrate="Sort by winrate instead of alphabetically.",
+        time_range="Matches recorded in the last N days.",
+        since="Custom start date: YYYY-MM-DD.",
+        until="Custom end date: YYYY-MM-DD.",
+        result="Wins or losses only.",
+        team="Draft side/team filter.",
+        score="Score filter.",
+        with_player="Only matches on the same team as this member.",
+        against_player="Only matches against this member.",
+    )
+    async def mapwr_slash(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member = None,
+        player: str = None,
+        role_or_champion: str = None,
+        min_games: int = 1,
+        sort_by_winrate: bool = False,
+        time_range: TimeRange = None,
+        since: str = None,
+        until: str = None,
+        result: ResultFilter = None,
+        team: TeamFilter = None,
+        score: ScoreFilter = None,
+        with_player: discord.Member = None,
+        against_player: discord.Member = None,
+    ):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        try:
+            target_user = await self._slash_target(interaction, user, player)
+            args = [str(target_user.id)] if getattr(target_user, "id", None) else [target_user.display_name]
+            args.extend(_split_words(role_or_champion))
+            if min_games and min_games > 1:
+                args.extend(["-m", str(min_games)])
+            if sort_by_winrate:
+                args.append("-wr")
+            args.extend(_slash_filter_args(
+                time_range=time_range,
+                since=since,
+                until=until,
+                result=result,
+                team=team,
+                score=score,
+                with_player=with_player,
+                against_player=against_player,
+            ))
+            await self.map_winrates_cmd.callback(self, ctx, *args)
+        except commands.BadArgument as exc:
+            await ctx.send(str(exc))
+
     CHAMPION_COMPARE_HELP = """
 Compare two champions overall and by map.
 
 **Usage:** `!champcompare <champion1> <champion2> [filters]`
 
-**Filters:** `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `map <name>`, `with <player>`, `against <player>`
+**Filters:** time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
 
 **Examples:**
 - `!champcompare atlas khan`
@@ -1356,12 +1868,57 @@ Compare two champions overall and by map.
             embed.set_footer(text=" â€¢ ".join(footer_parts))
         await ctx.send(embed=embed)
 
+    @app_commands.command(name="champcompare", description="Compare two champions overall and by map.")
+    @app_commands.describe(
+        champion_1="First champion.",
+        champion_2="Second champion.",
+        time_range="Matches recorded in the last N days.",
+        since="Custom start date: YYYY-MM-DD.",
+        until="Custom end date: YYYY-MM-DD.",
+        map_name="Map name.",
+        result="Wins or losses only.",
+        team="Draft side/team filter.",
+        score="Score filter.",
+        with_player="Only matches on the same team as this member.",
+        against_player="Only matches against this member.",
+    )
+    async def champcompare_slash(
+        self,
+        interaction: discord.Interaction,
+        champion_1: str,
+        champion_2: str,
+        time_range: TimeRange = None,
+        since: str = None,
+        until: str = None,
+        map_name: str = None,
+        result: ResultFilter = None,
+        team: TeamFilter = None,
+        score: ScoreFilter = None,
+        with_player: discord.Member = None,
+        against_player: discord.Member = None,
+    ):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        args = _split_words(champion_1) + _split_words(champion_2)
+        args.extend(_slash_filter_args(
+            time_range=time_range,
+            since=since,
+            until=until,
+            map_name=map_name,
+            result=result,
+            team=team,
+            score=score,
+            with_player=with_player,
+            against_player=against_player,
+        ))
+        await self.champion_compare_cmd.callback(self, ctx, *args)
+
     CHAMPION_MAP_WINRATES_HELP = """
 Show one champion's winrate on every map.
 
 **Usage:** `!champmapwr <champion> [-m <games>] [-wr] [filters]`
 
-**Filters:** `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `with <player>`, `against <player>`
+**Filters:** time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), result, team, score, with/against player
 
 **Examples:**
 - `!champmapwr atlas` - Atlas map winrates.
@@ -1459,6 +2016,54 @@ Show one champion's winrate on every map.
             embed.set_footer(text=" • ".join(footer_parts))
         await ctx.send(embed=embed, file=icon_file)
 
+    @app_commands.command(name="champmapwr", description="Show one champion's winrate on every map.")
+    @app_commands.describe(
+        champion="Champion name.",
+        min_games="Minimum games per map.",
+        sort_by_winrate="Sort by winrate instead of alphabetically.",
+        time_range="Matches recorded in the last N days.",
+        since="Custom start date: YYYY-MM-DD.",
+        until="Custom end date: YYYY-MM-DD.",
+        result="Wins or losses only.",
+        team="Draft side/team filter.",
+        score="Score filter.",
+        with_player="Only matches on the same team as this member.",
+        against_player="Only matches against this member.",
+    )
+    async def champmapwr_slash(
+        self,
+        interaction: discord.Interaction,
+        champion: str,
+        min_games: int = 1,
+        sort_by_winrate: bool = False,
+        time_range: TimeRange = None,
+        since: str = None,
+        until: str = None,
+        result: ResultFilter = None,
+        team: TeamFilter = None,
+        score: ScoreFilter = None,
+        with_player: discord.Member = None,
+        against_player: discord.Member = None,
+    ):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        args = _split_words(champion)
+        if min_games and min_games > 1:
+            args.extend(["-m", str(min_games)])
+        if sort_by_winrate:
+            args.append("-wr")
+        args.extend(_slash_filter_args(
+            time_range=time_range,
+            since=since,
+            until=until,
+            result=result,
+            team=team,
+            score=score,
+            with_player=with_player,
+            against_player=against_player,
+        ))
+        await self.champion_map_winrates_cmd.callback(self, ctx, *args)
+
     LEADERBOARD_HELP = """
 Shows player rankings, with optional filters for champions or roles.
 
@@ -1470,7 +2075,7 @@ Shows player rankings, with optional filters for champions or roles.
 - `[limit]`: The number of players to show. Defaults to `20`.
 - `[-b]`: Optional flag to show the bottom of the leaderboard.
 - `[-m <games>]`: Optional flag to set a minimum number of games played to qualify. Defaults to 1 (all players).
-- `[filters]`: `map <name>`, `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `with <player>`, `against <player>`
+- `[filters]`: time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
 
 **Available Stats:**
 - `winrate` (or `wr`): Overall Winrate
@@ -1655,6 +2260,63 @@ Shows player rankings, with optional filters for champions or roles.
         embed.description = "\n".join(description)
         await ctx.send(embed=embed)
 
+    @app_commands.command(name="leaderboard", description="Show player rankings with structured filters.")
+    @app_commands.describe(
+        stat="Statistic to rank by, e.g. wr, kda, kp, dmg, heal_pm, dhpm.",
+        champion_or_role="Optional champion or role filter.",
+        limit="Number of players to show, max 50.",
+        bottom="Show the bottom of the leaderboard.",
+        min_games="Minimum games to qualify.",
+        time_range="Matches recorded in the last N days.",
+        since="Custom start date: YYYY-MM-DD.",
+        until="Custom end date: YYYY-MM-DD.",
+        map_name="Map name.",
+        result="Wins or losses only.",
+        team="Draft side/team filter.",
+        score="Score filter.",
+        with_player="Only matches on the same team as this member.",
+        against_player="Only matches against this member.",
+    )
+    async def leaderboard_slash(
+        self,
+        interaction: discord.Interaction,
+        stat: str = "wr",
+        champion_or_role: str = None,
+        limit: int = 20,
+        bottom: bool = False,
+        min_games: int = 1,
+        time_range: TimeRange = None,
+        since: str = None,
+        until: str = None,
+        map_name: str = None,
+        result: ResultFilter = None,
+        team: TeamFilter = None,
+        score: ScoreFilter = None,
+        with_player: discord.Member = None,
+        against_player: discord.Member = None,
+    ):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        args = [stat]
+        args.extend(_split_words(champion_or_role))
+        args.append(str(limit))
+        if bottom:
+            args.append("-b")
+        if min_games and min_games > 1:
+            args.extend(["-m", str(min_games)])
+        args.extend(_slash_filter_args(
+            time_range=time_range,
+            since=since,
+            until=until,
+            map_name=map_name,
+            result=result,
+            team=team,
+            score=score,
+            with_player=with_player,
+            against_player=against_player,
+        ))
+        await self.leaderboard_cmd.callback(self, ctx, *args)
+
     MAP_HELP = """
 Shortcut leaderboard for one map.
 
@@ -1685,6 +2347,63 @@ This is the same as using `!lb ... map <map name>`.
 
         leaderboard_args = list(remaining_args) + ["map", resolved_map]
         await self.leaderboard_cmd.callback(self, ctx, *leaderboard_args)
+
+    @app_commands.command(name="map", description="Shortcut leaderboard for one map.")
+    @app_commands.describe(
+        map_name="Map name, e.g. Jaguar Falls.",
+        stat="Statistic to rank by, e.g. wr, kda, kp, dmg, heal_pm, dhpm.",
+        champion_or_role="Optional champion or role filter.",
+        limit="Number of players to show, max 50.",
+        bottom="Show the bottom of the leaderboard.",
+        min_games="Minimum games to qualify.",
+        time_range="Matches recorded in the last N days.",
+        since="Custom start date: YYYY-MM-DD.",
+        until="Custom end date: YYYY-MM-DD.",
+        result="Wins or losses only.",
+        team="Draft side/team filter.",
+        score="Score filter.",
+        with_player="Only matches on the same team as this member.",
+        against_player="Only matches against this member.",
+    )
+    async def map_slash(
+        self,
+        interaction: discord.Interaction,
+        map_name: str,
+        stat: str = "wr",
+        champion_or_role: str = None,
+        limit: int = 20,
+        bottom: bool = False,
+        min_games: int = 1,
+        time_range: TimeRange = None,
+        since: str = None,
+        until: str = None,
+        result: ResultFilter = None,
+        team: TeamFilter = None,
+        score: ScoreFilter = None,
+        with_player: discord.Member = None,
+        against_player: discord.Member = None,
+    ):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        args = _split_words(map_name)
+        args.append(stat)
+        args.extend(_split_words(champion_or_role))
+        args.append(str(limit))
+        if bottom:
+            args.append("-b")
+        if min_games and min_games > 1:
+            args.extend(["-m", str(min_games)])
+        args.extend(_slash_filter_args(
+            time_range=time_range,
+            since=since,
+            until=until,
+            result=result,
+            team=team,
+            score=score,
+            with_player=with_player,
+            against_player=against_player,
+        ))
+        await self.map_cmd.callback(self, ctx, *args)
 
     @commands.command(
         name="compare",
@@ -1811,6 +2530,21 @@ This is the same as using `!lb ... map <map name>`.
         
         await ctx.send(embed=embed)
 
+    @app_commands.command(name="compare", description="Head-to-head comparison between two linked Discord users.")
+    @app_commands.describe(
+        user_1="First user.",
+        user_2="Second user. Leave empty to compare against yourself.",
+    )
+    async def compare_slash(
+        self,
+        interaction: discord.Interaction,
+        user_1: discord.Member,
+        user_2: discord.Member = None,
+    ):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        await self.compare_cmd.callback(self, ctx, user_1, user_2)
+
     CHAMPION_LEADERBOARD_HELP = """
 Shows champion rankings aggregated across all players.
 
@@ -1822,7 +2556,7 @@ Shows champion rankings aggregated across all players.
 - `[limit]`: The number of champions to show. Defaults to `20`.
 - `[-b]`: Optional flag to show the bottom of the leaderboard.
 - `[-m <games>]`: Optional flag to set a minimum number of games to qualify. Defaults to 1.
-- `[filters]`: `map <name>`, `wins`, `losses`, `team1/team2`, `4-3`, `close`, `stomp`, `sweep`, `with <player>`, `against <player>`
+- `[filters]`: time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
 
 **Available Stats:**
 - `winrate` (or `wr`): Overall Winrate
@@ -1992,6 +2726,63 @@ Shows champion rankings aggregated across all players.
         
         embed.description = "\n".join(description)
         await ctx.send(embed=embed)
+
+    @app_commands.command(name="champ_lb", description="Show champion rankings with structured filters.")
+    @app_commands.describe(
+        stat="Statistic to rank by, e.g. wr, kda, kp, dmg, heal_pm, dhpm.",
+        role="Optional role filter, e.g. support, tank, point tank.",
+        limit="Number of champions to show, max 50.",
+        bottom="Show the bottom of the leaderboard.",
+        min_games="Minimum games to qualify.",
+        time_range="Matches recorded in the last N days.",
+        since="Custom start date: YYYY-MM-DD.",
+        until="Custom end date: YYYY-MM-DD.",
+        map_name="Map name.",
+        result="Wins or losses only.",
+        team="Draft side/team filter.",
+        score="Score filter.",
+        with_player="Only matches on the same team as this member.",
+        against_player="Only matches against this member.",
+    )
+    async def champ_lb_slash(
+        self,
+        interaction: discord.Interaction,
+        stat: str = "wr",
+        role: str = None,
+        limit: int = 20,
+        bottom: bool = False,
+        min_games: int = 1,
+        time_range: TimeRange = None,
+        since: str = None,
+        until: str = None,
+        map_name: str = None,
+        result: ResultFilter = None,
+        team: TeamFilter = None,
+        score: ScoreFilter = None,
+        with_player: discord.Member = None,
+        against_player: discord.Member = None,
+    ):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        args = [stat]
+        args.extend(_split_words(role))
+        args.append(str(limit))
+        if bottom:
+            args.append("-b")
+        if min_games and min_games > 1:
+            args.extend(["-m", str(min_games)])
+        args.extend(_slash_filter_args(
+            time_range=time_range,
+            since=since,
+            until=until,
+            map_name=map_name,
+            result=result,
+            team=team,
+            score=score,
+            with_player=with_player,
+            against_player=against_player,
+        ))
+        await self.champion_leaderboard_cmd.callback(self, ctx, *args)
 
 
 async def setup(bot):
