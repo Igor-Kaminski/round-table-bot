@@ -1,23 +1,27 @@
 # run.py
 
-import discord
-from discord.ext import commands
+import asyncio
 import os
-import dotenv
 import re
-from db import create_database
 
-# Load environment variables
+import discord
+import dotenv
+from discord.ext import commands
+
+from db import backfill_match_registered_at, create_database
+
+
 dotenv.load_dotenv()
 
-# Bot configuration
 intents = discord.Intents.default()
 intents.message_content = True
 intents.members = True
-bot = commands.Bot(command_prefix=["!"], intents=intents)
-_startup_backfill_done = False
 
+bot = commands.Bot(command_prefix=["!"], intents=intents)
 GUILD_ID = int(os.getenv("GUILD_ID"))
+
+_startup_backfill_done = False
+_startup_cogs_loaded = False
 
 
 async def collect_match_registered_at_from_match_results():
@@ -48,43 +52,48 @@ async def collect_match_registered_at_from_match_results():
     return match_timestamps
 
 
+async def backfill_match_timestamps_task():
+    try:
+        match_registered_at = await collect_match_registered_at_from_match_results()
+        updated = backfill_match_registered_at(match_registered_at)
+        if updated:
+            print(f"Backfilled registered_at for {updated} match rows.")
+    except Exception as e:
+        print(f"Failed to collect/backfill match timestamps from #match-results: {e}")
+
+
 @bot.event
 async def on_ready():
-    global _startup_backfill_done
+    global _startup_backfill_done, _startup_cogs_loaded
     print(f"Logged in as {bot.user}")
 
-    match_registered_at = {}
-    if not _startup_backfill_done:
-        _startup_backfill_done = True
-        try:
-            match_registered_at = await collect_match_registered_at_from_match_results()
-        except Exception as e:
-            print(f"Failed to collect match timestamps from #match-results: {e}")
-
     try:
-        create_database(match_registered_at)
+        create_database()
     except Exception as e:
         print(f"Failed to initialize database: {e}")
         return
-    
-    # Load all cogs
-    cogs = ["cogs.admin", "cogs.general", "cogs.stats", "cogs.listeners"]
-    for cog in cogs:
+
+    if not _startup_cogs_loaded:
+        _startup_cogs_loaded = True
+        cogs = ["cogs.admin", "cogs.general", "cogs.stats", "cogs.listeners"]
+        for cog in cogs:
+            try:
+                await bot.load_extension(cog)
+                print(f"Loaded {cog}")
+            except Exception as e:
+                print(f"Failed to load {cog}: {e}")
+
         try:
-            await bot.load_extension(cog)
-            print(f"✅ Loaded {cog}")
+            guild = discord.Object(id=GUILD_ID)
+            bot.tree.copy_global_to(guild=guild)
+            synced = await bot.tree.sync(guild=guild)
+            print(f"Synced {len(synced)} command(s) to guild")
         except Exception as e:
-            print(f"❌ Failed to load {cog}: {e}")
-    
-    # Sync slash commands
-    try:
-        guild = discord.Object(id=GUILD_ID)
-        bot.tree.copy_global_to(guild=guild)
-        synced = await bot.tree.sync(guild=guild)
-        print(f"Synced {len(synced)} command(s) to guild")
-    except Exception as e:
-        print(f"Failed to sync commands: {e}")
+            print(f"Failed to sync commands: {e}")
+
+    if not _startup_backfill_done:
+        _startup_backfill_done = True
+        asyncio.create_task(backfill_match_timestamps_task())
 
 
-# Run the bot
 bot.run(os.getenv("BOT_TOKEN"))
