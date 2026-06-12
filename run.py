@@ -65,6 +65,10 @@ async def collect_match_registered_at_from_match_results():
         return {}
 
     missing_match_ids = get_missing_registered_match_ids()
+    if not missing_match_ids:
+        print("No missing match timestamps to backfill.")
+        return {}
+
     match_timestamps = {}
     command_pattern = re.compile(r">>\s*match_data\s+(\d{9,12})", re.IGNORECASE)
     scoreboard_pattern = re.compile(r"^\s*(\d{9,12})\s*,", re.MULTILINE)
