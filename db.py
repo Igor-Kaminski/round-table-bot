@@ -1018,7 +1018,7 @@ def get_player_stats(player_id, champions=None, filters=None):
                 SUM(ps.healing) AS total_healing,
                 SUM(ps.self_healing) AS total_self_healing,
                 SUM(ps.credits) AS total_credits,
-                SUM(ott.team_damage) AS total_enemy_damage,
+                SUM(COALESCE(ott.team_damage, 0)) AS total_enemy_damage,
                 SUM(m.time) AS total_time_in_minutes,
                 SUM(CASE WHEN (ps.team = 1 AND m.team1_score > m.team2_score) OR (ps.team = 2 AND m.team2_score > m.team1_score) THEN 1 ELSE 0 END) AS total_wins,
                 
@@ -1028,7 +1028,7 @@ def get_player_stats(player_id, champions=None, filters=None):
             FROM player_stats ps
             JOIN matches m ON ps.match_id = m.match_id
             JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
-            JOIN TeamTotals ott ON ps.match_id = ott.match_id AND ps.team != ott.team
+            LEFT JOIN TeamTotals ott ON ps.match_id = ott.match_id AND ps.team != ott.team
             WHERE {where_clause}
         """
 
@@ -1041,6 +1041,8 @@ def get_player_stats(player_id, champions=None, filters=None):
         games_played = data["games_played"]
         total_wins = data["total_wins"]
         total_time_in_minutes = data["total_time_in_minutes"]
+
+        total_enemy_damage = data["total_enemy_damage"] or 0
 
         stats_dict = {
             "games": games_played,
@@ -1067,7 +1069,7 @@ def get_player_stats(player_id, champions=None, filters=None):
             "damage_delta": round((data["total_damage"] - data["total_taken"]) / games_played) if games_played > 0 else 0,
             "kill_share": data["avg_kill_share"] or 0,
             "damage_share": data["avg_damage_share"] or 0,
-            "damage_healed_pct": round((data["total_healing"] / max(1, data["total_enemy_damage"])) * 100, 2),
+            "damage_healed_pct": round((data["total_healing"] / total_enemy_damage) * 100, 2) if total_enemy_damage > 0 else 0,
         }
 
         total_healing = data["total_healing"]
@@ -1087,10 +1089,10 @@ def get_player_stats(player_id, champions=None, filters=None):
                     FROM player_stats
                     GROUP BY match_id, team
                 )
-                SELECT SUM(ps.healing), SUM(m.time), COUNT(ps.match_id), SUM(ott.team_damage)
+                SELECT SUM(ps.healing), SUM(m.time), COUNT(ps.match_id), SUM(COALESCE(ott.team_damage, 0))
                 FROM player_stats ps
                 JOIN matches m ON ps.match_id = m.match_id
-                JOIN TeamTotals ott ON ps.match_id = ott.match_id AND ps.team != ott.team
+                LEFT JOIN TeamTotals ott ON ps.match_id = ott.match_id AND ps.team != ott.team
                 WHERE {healing_where_clause}
             """, healing_params)
             healing_row = cursor.fetchone()
@@ -1098,7 +1100,7 @@ def get_player_stats(player_id, champions=None, filters=None):
             support_time = healing_row[1] or 0
             support_games = healing_row[2] or 0
             support_enemy_damage = healing_row[3] or 0
-            stats_dict["damage_healed_pct"] = round((total_healing / max(1, support_enemy_damage)) * 100, 2)
+            stats_dict["damage_healed_pct"] = round((total_healing / support_enemy_damage) * 100, 2) if support_enemy_damage > 0 else 0
             
         stats_dict["healing_pm"] = round(total_healing / max(1, support_time), 2)
         stats_dict["avg_healing"] = round(total_healing / max(1, support_games))
@@ -1384,12 +1386,12 @@ def get_champion_overall_stats(champion, filters=None):
                     ps.*,
                     tt.team_kill_participations,
                     tt.team_damage,
-                    ott.team_damage AS enemy_team_damage,
+                    COALESCE(ott.team_damage, 0) AS enemy_team_damage,
                     CASE WHEN tt.team_kill_participations > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kill_participations ELSE 0 END AS kill_share,
                     CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END AS damage_share
                 FROM player_stats ps
                 JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
-                JOIN TeamTotals ott ON ps.match_id = ott.match_id AND ps.team != ott.team
+                LEFT JOIN TeamTotals ott ON ps.match_id = ott.match_id AND ps.team != ott.team
             )
             SELECT
                 COUNT(ms.match_id) AS games,
@@ -1440,7 +1442,7 @@ def get_champion_overall_stats(champion, filters=None):
             "shield_avg": round((row["shielding"] or 0) / games),
             "credits_pm": round((row["credits"] or 0) / minutes, 2),
             "obj_avg": round((row["objective_time"] or 0) / games, 2),
-            "damage_healed_pct": round(healing * 100.0 / max(1, enemy_damage), 2),
+            "damage_healed_pct": round(healing * 100.0 / enemy_damage, 2) if enemy_damage > 0 else 0,
             "kp": round(row["kp"] or 0, 2),
             "dmg_share": round(row["dmg_share"] or 0, 2),
         }
