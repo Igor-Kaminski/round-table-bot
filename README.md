@@ -72,7 +72,7 @@ Prefix commands (`!`) and slash commands (`/`) are both supported.
 - `!compare @user1 [@user2]` / `/compare` - Compare two players
 
 ### Filters
-- Time: `last 3d`, `last 7d`, `last 14d`, `last 30d`, `since YYYY-MM-DD`, or `from YYYY-MM-DD to YYYY-MM-DD`
+- Time: `last 3d`, `last 7d`, `last 14d`, `last 30d`, `season 4`, `season 3.5`, `season 3`, `season 2`, `since YYYY-MM-DD`, or `from YYYY-MM-DD to YYYY-MM-DD`
 - Match: `map <name>`, `wins`, `losses`, `team1`, `team2`, `4-3`, `close`, `stomp`, `sweep`
 - Players: `with <player>` or `against <player>`
 

@@ -28,7 +28,7 @@ from db import (
 )
 
 
-TimeRange = Literal["3d", "7d", "14d", "30d"]
+TimeRange = Literal["3d", "7d", "14d", "30d", "season 4", "season 3.5", "season 3", "season 2", "season 1"]
 ResultFilter = Literal["wins", "losses"]
 TeamFilter = Literal["team1", "team2"]
 ScoreFilter = Literal["4-3", "close", "stomp", "sweep"]
@@ -87,7 +87,30 @@ SCORE_FILTER_ALIASES = {
 }
 
 TIME_FILTER_KEYWORDS = {
-    "time", "last", "since", "after", "from", "between", "before", "until",
+    "time", "last", "since", "after", "from", "between", "before", "until", "season",
+}
+
+MISSING_SEASON_MESSAGE = "Executive team regrets to inform you that our accounting team from previous quarters has lost these records."
+
+SEASON_FILTERS = {
+    "2": {
+        "before": "2025-10-04",
+        "label": "Season 2",
+    },
+    "3": {
+        "after": "2025-10-04",
+        "before": "2026-06-12",
+        "label": "Season 3",
+    },
+    "3.5": {
+        "after": "2026-04-01",
+        "before": "2026-06-12",
+        "label": "Season 3.5",
+    },
+    "4": {
+        "after": "2026-06-12",
+        "label": "Season 4",
+    },
 }
 
 FILTER_KEYWORDS = {
@@ -173,6 +196,41 @@ def _date_filter_error(arg):
     return f"`{arg}` is not a valid date. Use `YYYY-MM-DD`, for example `2026-05-25`."
 
 
+def _season_key(value):
+    compact = _compact_arg(value).replace(".", "").replace(" ", "")
+    if compact.startswith("season"):
+        compact = compact[len("season"):]
+    elif compact.startswith("s"):
+        compact = compact[1:]
+    if compact == "35":
+        return "3.5"
+    if compact in {"1", "2", "3", "4"}:
+        return compact
+    return None
+
+
+def _apply_season_filter(filters, season):
+    if season == "1":
+        return MISSING_SEASON_MESSAGE
+
+    season_filter = SEASON_FILTERS.get(season)
+    if not season_filter:
+        return "Unknown season. Use `season 4`, `season 3.5`, `season 3`, or `season 2`."
+
+    if season_filter.get("after"):
+        filters["registered_after"] = _parse_date_start(season_filter["after"])
+    else:
+        filters.pop("registered_after", None)
+
+    if season_filter.get("before"):
+        filters["registered_before"] = _parse_date_start(season_filter["before"])
+    else:
+        filters.pop("registered_before", None)
+
+    filters["time_label"] = season_filter["label"]
+    return None
+
+
 def _set_last_registered_filter(filters, seconds, label):
     filters["registered_after"] = int(time.time()) - seconds
     filters.pop("registered_before", None)
@@ -254,7 +312,10 @@ def _slash_filter_args(
 ):
     args = []
     if time_range:
-        args.extend(["last", time_range])
+        if _season_key(time_range):
+            args.extend(_split_words(time_range))
+        else:
+            args.extend(["last", time_range])
     elif since and until:
         args.extend(["from", since, "to", until])
     elif since:
@@ -298,6 +359,20 @@ async def _extract_match_filters(ctx, args):
         arg = str(args[i])
         raw_key = arg.lower()
         key = _compact_arg(arg)
+
+        season = _season_key(arg)
+        consumed_until = i + 1
+        if key == "season":
+            if i + 1 >= len(args):
+                return remaining, filters, "Use `season 4`, `season 3.5`, `season 3`, or `season 2`."
+            season = _season_key(f"season {args[i + 1]}")
+            consumed_until = i + 2
+        if season:
+            season_error = _apply_season_filter(filters, season)
+            if season_error:
+                return remaining, filters, season_error
+            i = consumed_until
+            continue
 
         standalone_period = _parse_period_token(arg)
         if standalone_period:
@@ -541,6 +616,7 @@ class Stats(commands.Cog):
                 "`!stats me fernando team2` - Fernando stats on Team 2.",
                 "`!stats me moji 4-3` - Moji stats in games ending 4-3.",
                 "`!stats me support last 7d` - Your support stats from matches recorded in the last 7 days.",
+                "`!stats me support season 4` - Your support stats from Season 4.",
                 "`!stats me barik with lulub against nozy` - Barik stats with lulub against nozy.",
             ],
             "top": [
@@ -554,6 +630,7 @@ class Stats(commands.Cog):
                 "`!top me nyx team1` - Nyx on Team 1.",
                 "`!top me ash losses` - Ash in losses only.",
                 "`!top me support 14d` - Support champion table from matches recorded in the last 14 days.",
+                "`!top me -wr flank season 3.5` - Flank champion table from Season 3.5.",
                 "`!top me fernando 4-3 with pjamo` - Fernando in 4-3 games with pjamo.",
             ],
             "leaderboard": [
@@ -566,6 +643,7 @@ class Stats(commands.Cog):
                 "`!lb wr ash against nozy` - Ash WR against nozy.",
                 "`!lb dmg bk wins` - Bomb King damage/min in wins.",
                 "`!lb wr support last 30d` - Support WR leaderboard from recently recorded matches.",
+                "`!lb wr support season 4` - Support WR leaderboard from Season 4.",
                 "`!lb wr point tank map jaguar falls` - Point tank WR on Jaguar Falls.",
                 "`!lb wr off tank losses with lulub` - Off tank WR in losses with lulub.",
             ],
@@ -579,6 +657,7 @@ class Stats(commands.Cog):
                 "`!clb wr flank losses` - Flank champion WR in losses.",
                 "`!clb dmg damage team2 stomp` - Damage champion damage/min on Team 2 in stomps.",
                 "`!clb wr support from 2026-05-01 to 2026-05-25` - Support champion WR in a custom recorded range.",
+                "`!clb wr point tank season 3` - Point tank champion WR from Season 3.",
                 "`!clb wr support against nozy` - Support champion WR against nozy.",
                 "`!clb wr point tank map stone keep night` - Point tank WR on Stone Keep Night.",
             ],
@@ -605,6 +684,7 @@ class Stats(commands.Cog):
                 "`!mapwr me barik team2` - Your Barik map WR on Team 2.",
                 "`!mapwr Eagle moji losses` - Eagle's Moji map records in losses only.",
                 "`!mapwr Eagle inara 4-3` - Eagle's Inara map WR in 4-3 games.",
+                "`!mapwr Eagle flank season 4` - Eagle's flank map WR from Season 4.",
                 "`!mapwr Eagle -wr` - Eagle's map WR sorted by winrate.",
             ],
             "champmapwr": [
@@ -616,6 +696,7 @@ class Stats(commands.Cog):
                 "`!champmapwr khan 4-3` - Khan map WR in 4-3 games.",
                 "`!champmapwr atlas close` - Atlas map WR in close games.",
                 "`!champmapwr khan against nozy` - Khan map WR against nozy.",
+                "`!champmapwr atlas season 3.5` - Atlas map WR from Season 3.5.",
                 "`!champmapwr atlas -m 5` - Atlas map WR, maps with 5+ games only.",
                 "`!cmapwr ying losses` - Ying map records in losses only.",
                 "`!champmapwr khan -wr` - Khan map WR sorted by winrate.",
@@ -626,6 +707,7 @@ class Stats(commands.Cog):
                 "`!champcompare bk willo` - Compare Bomb King and Willo.",
                 "`!champcompare atlas khan team2` - Compare both champs on Team 2 only.",
                 "`!champcompare atlas khan 4-3` - Compare both champs in 4-3 games.",
+                "`!champcompare atlas khan season 4` - Compare both champs in Season 4.",
                 "`!champcompare ying lilith against nozy` - Compare both champs against nozy.",
                 "`!champcompare barik inara map jaguar falls` - Compare map-filtered point tanks.",
                 "`!cc andy evie close` - Short alias, close games only.",
@@ -638,6 +720,7 @@ class Stats(commands.Cog):
                 "`sweep` - 4-0 games, e.g. `!lb wr bk sweep`.",
                 "`wins` - Wins only, e.g. `!stats me damba wins`.",
                 "`losses` - Losses only, e.g. `!lb kp moji losses`.",
+                "`season 4` / `season 3.5` / `season 3` / `season 2` - Season filters, e.g. `!lb wr support season 4`. Season 1 records are unavailable.",
                 "`map <name>` - Map filter, e.g. `!lb wr ying map jaguar falls`.",
                 "`with <player>` - Same team, e.g. `!lb wr barik with pjamo`.",
                 "`against <player>` - Enemy team, e.g. `!lb wr ash against nozy`.",
@@ -693,6 +776,7 @@ class Stats(commands.Cog):
                 name="Time",
                 value=(
                     "`last 3d` / `last 7d` / `last 14d` / `last 30d` - recent recorded matches.\n"
+                    "`season 4`, `season 3.5`, `season 3`, `season 2` - recorded season windows. Season 1 records are unavailable.\n"
                     "`time 7d` or just `7d` - short form for a recent window.\n"
                     "`since 2026-05-01` - recorded on or after a date.\n"
                     "`from 2026-05-01 to 2026-05-25` - custom date range."
@@ -758,7 +842,7 @@ class Stats(commands.Cog):
             "The user argument accepts a mention, Discord ID, `me`, a username, "
             "a main IGN, an alt IGN, or even an unlinked IGN (match history only).\n"
             "Roles: `damage`, `flank`, `support`, `tank`, `point tank`, `off tank`.\n"
-            "Filters: time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), map, "
+            "Filters: time (`last 7d`, `season 4`, `from YYYY-MM-DD to YYYY-MM-DD`), map, "
             "result, team, score, with/against player.\n"
             "Examples:\n"
             "- `!stats me`\n"
@@ -1021,7 +1105,7 @@ Shows champion statistics breakdown for a player.
 - `[-stat]`: Stats to display (e.g., `-kpm -dmg_share -kda`)
 - `[role/champion]`: Filter by role (`damage`, `flank`, `support`, `tank`, `point tank`, `off tank`) or champion name
 - `[-m <games>]`: Minimum games filter (default: 1)
-- `[filters]`: time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
+- `[filters]`: time (`last 7d`, `season 4`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
 
 **Available Stats:**
 - `-wr` or `-winrate`: Winrate percentage
@@ -1573,7 +1657,7 @@ Show a player's winrate on every map, with optional role/champion filters.
 **Usage:** `!mapwr [user|ign] [champion|role] [-m <games>] [-wr] [filters]`
 
 **Roles:** `damage`, `flank`, `support`, `tank`, `point tank`, `off tank`
-**Filters:** time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), result, team, score, with/against player
+**Filters:** time (`last 7d`, `season 4`, `from YYYY-MM-DD to YYYY-MM-DD`), result, team, score, with/against player
 
 **Examples:**
 - `!mapwr` - Your map winrates.
@@ -1761,7 +1845,7 @@ Compare two champions overall and by map.
 
 **Usage:** `!champcompare <champion1> <champion2> [filters]`
 
-**Filters:** time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
+**Filters:** time (`last 7d`, `season 4`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
 
 **Examples:**
 - `!champcompare atlas khan`
@@ -1918,7 +2002,7 @@ Show one champion's winrate on every map.
 
 **Usage:** `!champmapwr <champion> [-m <games>] [-wr] [filters]`
 
-**Filters:** time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), result, team, score, with/against player
+**Filters:** time (`last 7d`, `season 4`, `from YYYY-MM-DD to YYYY-MM-DD`), result, team, score, with/against player
 
 **Examples:**
 - `!champmapwr atlas` - Atlas map winrates.
@@ -2075,7 +2159,7 @@ Shows player rankings, with optional filters for champions or roles.
 - `[limit]`: The number of players to show. Defaults to `20`.
 - `[-b]`: Optional flag to show the bottom of the leaderboard.
 - `[-m <games>]`: Optional flag to set a minimum number of games played to qualify. Defaults to 1 (all players).
-- `[filters]`: time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
+- `[filters]`: time (`last 7d`, `season 4`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
 
 **Available Stats:**
 - `winrate` (or `wr`): Overall Winrate
@@ -2556,7 +2640,7 @@ Shows champion rankings aggregated across all players.
 - `[limit]`: The number of champions to show. Defaults to `20`.
 - `[-b]`: Optional flag to show the bottom of the leaderboard.
 - `[-m <games>]`: Optional flag to set a minimum number of games to qualify. Defaults to 1.
-- `[filters]`: time (`last 7d`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
+- `[filters]`: time (`last 7d`, `season 4`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
 
 **Available Stats:**
 - `winrate` (or `wr`): Overall Winrate
