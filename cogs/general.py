@@ -36,6 +36,144 @@ class General(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
 
+    HELP_GROUPS = {
+        "Stats": [
+            ("stats", "Player stats by role/champion/filter."),
+            ("top", "Your champion table with custom stat columns."),
+            ("history", "Recent match history for a player."),
+        ],
+        "Leaderboards & Maps": [
+            ("lb", "Player leaderboard for WR, KP, DPM, healing, and more."),
+            ("clb", "Champion leaderboard across roles and filters."),
+            ("map", "Shortcut leaderboard for one map."),
+            ("mapwr", "A player's winrate on every map."),
+            ("champmapwr", "One champion's record on every map."),
+            ("champcompare", "Compare two champions overall and by map."),
+        ],
+        "Matchups": [
+            ("compare", "Head-to-head comparison between two players."),
+            ("mates", "Best and worst teammates by winrate together."),
+            ("enemies", "Enemy players you beat most and lose to most."),
+            ("withchamps", "Records when champions are on your team."),
+            ("againstchamps", "Records when champions are against you."),
+        ],
+        "Filters & Examples": [
+            ("filters", "Show every filter style: season, map, score, with/against."),
+            ("examples", "Command examples from simple to spicy."),
+        ],
+        "Account": [
+            ("link", "Link Discord to IGN."),
+            ("add_alt", "Add an alternate IGN."),
+            ("alts", "Show linked main and alt IGNs."),
+            ("unlink", "Unlink your Discord from an IGN."),
+        ],
+        "Exec": [
+            ("query", "Run a SELECT query."),
+            ("ingest_text", "Insert a pasted scoreboard."),
+            ("delete_match", "Delete a match by ID."),
+            ("fetch_embeds", "Backfill queue embeds."),
+            ("link_disc", "Update a player's Discord ID."),
+            ("show_alts", "Show a player's alts."),
+            ("delete_alt", "Delete an alt IGN."),
+            ("player_id", "Get internal player ID."),
+            ("old_stats", "Legacy raw stats lookup."),
+        ],
+    }
+
+    HELP_GROUP_ALIASES = {
+        "leaderboards": "Leaderboards & Maps",
+        "leaderboard commands": "Leaderboards & Maps",
+        "maps": "Leaderboards & Maps",
+        "map commands": "Leaderboards & Maps",
+        "matchups": "Matchups",
+        "matchupcommands": "Matchups",
+        "matchup commands": "Matchups",
+        "account": "Account",
+        "accounts": "Account",
+        "exec": "Exec",
+        "admin": "Exec",
+        "filtercommands": "Filters & Examples",
+        "filter commands": "Filters & Examples",
+        "examplecommands": "Filters & Examples",
+        "example commands": "Filters & Examples",
+        "statcommands": "Stats",
+        "stat commands": "Stats",
+        "stats commands": "Stats",
+    }
+
+    def _help_overview_embed(self):
+        embed = discord.Embed(
+            title="BOSSMAN Help",
+            description=(
+                "Use `!help <command>` for full details, or `!examples <topic>` for practical commands.\n"
+                "Useful starts: `!help leaderboards`, `!help matchups`, `!help statcommands`."
+            ),
+            color=discord.Color.blue(),
+        )
+        for group_name, commands_info in self.HELP_GROUPS.items():
+            value = "\n".join(f"`!{name}` - {summary}" for name, summary in commands_info)
+            embed.add_field(name=group_name, value=value, inline=False)
+        return embed
+
+    def _help_group_embed(self, group_name):
+        commands_info = self.HELP_GROUPS[group_name]
+        embed = discord.Embed(
+            title=f"{group_name} Commands",
+            description="Use `!help <command>` for full usage, aliases, and examples.",
+            color=discord.Color.blue(),
+        )
+        embed.add_field(
+            name="Commands",
+            value="\n".join(f"`!{name}` - {summary}" for name, summary in commands_info),
+            inline=False,
+        )
+        return embed
+
+    def _command_help_embed(self, command):
+        aliases = ", ".join(f"`!{alias}`" for alias in command.aliases) if command.aliases else "None"
+        help_text = command.help or command.short_doc or "No detailed help available."
+        if len(help_text) > 3500:
+            help_text = help_text[:3490].rstrip() + "\n..."
+
+        embed = discord.Embed(
+            title=f"!{command.qualified_name}",
+            description=help_text,
+            color=discord.Color.green(),
+        )
+        embed.add_field(name="Aliases", value=aliases, inline=False)
+        return embed
+
+    async def _send_help(self, ctx, topic=None):
+        topic_key = (topic or "").strip().lower()
+        if not topic_key:
+            await ctx.send(embed=self._help_overview_embed())
+            return
+
+        command = self.bot.get_command(topic_key)
+        if command:
+            await ctx.send(embed=self._command_help_embed(command))
+            return
+
+        group_name = self.HELP_GROUP_ALIASES.get(topic_key)
+        if group_name:
+            await ctx.send(embed=self._help_group_embed(group_name))
+            return
+
+        await ctx.send(f"Unknown help topic `{topic}`. Try `!help`, `!help leaderboards`, or `!examples`.")
+
+    @commands.command(
+        name="help",
+        aliases=["h", "commands"],
+        help="Show grouped help. Usage: `!help [command|group]`, e.g. `!help leaderboard` or `!help mates`.",
+    )
+    async def help_cmd(self, ctx, *, topic: str = None):
+        await self._send_help(ctx, topic)
+
+    @app_commands.command(name="help", description="Show grouped help for bot commands.")
+    @app_commands.describe(topic="Optional command or group, e.g. leaderboard, matchups, mates.")
+    async def help_slash(self, interaction: discord.Interaction, topic: str = None):
+        await self._send_help(SlashContext(interaction), topic)
+
     @commands.command(
         name="link",
         help=(
