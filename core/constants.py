@@ -32,6 +32,7 @@ CHAMPION_ALIASES = {
     "lilith": "Lillith",
     "mal damba": "Mal'Damba",
     "maldamba": "Mal'Damba",
+    "nando": "Fernando",
     "ruk": "Ruckus",
 }
 
