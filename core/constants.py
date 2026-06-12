@@ -98,4 +98,4 @@ def resolve_champion_name(name):
 
     return None
 
-ALLOWED_CHANNELS = ["match-results", "admin"]
+ALLOWED_CHANNELS = ["match-results", "boss-matchresults", "admin"]
