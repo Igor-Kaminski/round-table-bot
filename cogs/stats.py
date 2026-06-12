@@ -23,6 +23,7 @@ from db import (
     get_leaderboard,
     get_champion_leaderboard,
     compare_by_player_ids,
+    get_teammate_records,
     get_top_champs,
     resolve_map_name,
 )
@@ -32,6 +33,7 @@ TimeRange = Literal["3d", "7d", "14d", "30d", "season 4", "season 3.5", "season 
 ResultFilter = Literal["wins", "losses"]
 TeamFilter = Literal["team1", "team2"]
 ScoreFilter = Literal["4-3", "close", "stomp", "sweep"]
+MateMode = Literal["both", "best", "worst"]
 
 
 class SlashContext:
@@ -584,6 +586,8 @@ class Stats(commands.Cog):
             "mapwr": "Map Winrate Examples",
             "champmapwr": "Champion Map Winrate Examples",
             "champcompare": "Champion Compare Examples",
+            "mates": "Teammate Examples",
+            "teammates": "Teammate Examples",
             "filters": "Filter Examples",
             "filter": "Filter Examples",
             "aliases": "Alias Examples",
@@ -596,6 +600,7 @@ class Stats(commands.Cog):
                 "`!examples mapwr` - Player map winrate examples.",
                 "`!examples champmapwr` - Champion map winrate examples.",
                 "`!examples champcompare` - Champion comparison examples.",
+                "`!examples mates` - Best and worst teammate examples.",
                 "`!examples lb` - Player leaderboard examples.",
                 "`!examples clb` - Champion leaderboard examples.",
                 "`!examples map` - Map shortcut examples.",
@@ -712,6 +717,15 @@ class Stats(commands.Cog):
                 "`!champcompare barik inara map jaguar falls` - Compare map-filtered point tanks.",
                 "`!cc andy evie close` - Short alias, close games only.",
             ],
+            "mates": [
+                "`!mates me` - Your best and worst teammates.",
+                "`!mates Eagle best` - Eagle's best teammates only.",
+                "`!mates me worst -m 5` - Worst teammates with at least 5 games together.",
+                "`!mates me support season 4` - Teammates while you played Support in Season 4.",
+                "`!mates me nando map jaguar falls` - Teammates while you played Fernando on Jaguar Falls.",
+                "`!mates me best 15 last 30d` - Top 15 recent teammates.",
+                "`!mates me worst against nozy` - Worst teammates in games against Nozy.",
+            ],
             "filters": [
                 "`team1` / `team2` - Filter by draft side, e.g. `!lb wr barik team2`.",
                 "`4-3` - Exact scoreline, e.g. `!lb wr inara 4-3`.",
@@ -755,6 +769,8 @@ class Stats(commands.Cog):
             "cc": "champcompare",
             "ccompare": "champcompare",
             "champcmp": "champcompare",
+            "teammates": "mates",
+            "tmates": "mates",
             "filter": "filters",
             "alias": "aliases",
         }
@@ -764,7 +780,7 @@ class Stats(commands.Cog):
 
         embed = discord.Embed(
             title=topic_titles.get(topic_key, "Command Examples"),
-            description="Use `!examples stats`, `!examples lb`, `!examples mapwr`, `!examples champcompare`, or `!examples filters` for focused examples.",
+            description="Use `!examples stats`, `!examples lb`, `!examples mapwr`, `!examples champcompare`, `!examples mates`, or `!examples filters` for focused examples.",
             color=discord.Color.green(),
         )
         if topic_key == "filters":
@@ -810,15 +826,15 @@ class Stats(commands.Cog):
         name="examples",
         aliases=["example"],
         help=(
-            "Show useful command examples. Usage: `!examples [stats|top|lb|clb|map|mapwr|champmapwr|filters|aliases]`.\n"
-            "Examples: `!examples`, `!examples lb`, `!examples filters`, `!examples mapwr`, `!examples champmapwr`."
+            "Show useful command examples. Usage: `!examples [stats|top|lb|clb|map|mapwr|champmapwr|mates|filters|aliases]`.\n"
+            "Examples: `!examples`, `!examples lb`, `!examples mates`, `!examples filters`, `!examples mapwr`, `!examples champmapwr`."
         ),
     )
     async def examples_cmd(self, ctx, *, topic: str = None):
         await ctx.send(embed=self._examples_embed(topic))
 
     @app_commands.command(name="examples", description="Show useful command examples.")
-    @app_commands.describe(topic="Optional topic: stats, top, lb, clb, mapwr, champmapwr, filters, aliases")
+    @app_commands.describe(topic="Optional topic: stats, top, lb, clb, mapwr, champmapwr, mates, filters, aliases")
     async def examples_slash(self, interaction: discord.Interaction, topic: str = None):
         await interaction.response.send_message(embed=self._examples_embed(topic))
 
@@ -833,6 +849,183 @@ class Stats(commands.Cog):
     @app_commands.command(name="filters", description="Show available match filters.")
     async def filters_slash(self, interaction: discord.Interaction):
         await interaction.response.send_message(embed=self._examples_embed("filters"))
+
+    def _format_mate_rows(self, rows):
+        if not rows:
+            return ["No qualified teammates found."]
+
+        lines = [f"{'#':<3} {'Player':<18} {'WR':>7} {'Record':>9} {'Games':>5}", "-" * 46]
+        for index, row in enumerate(rows, 1):
+            name = (row["player_ign"] or "Unknown")[:18]
+            record = f"{row['wins']}-{row['losses']}"
+            lines.append(f"{index:<3} {name:<18} {row['winrate']:>6.1f}% {record:>9} {row['games']:>5}")
+        return lines
+
+    @commands.command(
+        name="mates",
+        aliases=["teammates", "tmates"],
+        help=(
+            "Show your best and worst teammates by winrate together.\n"
+            "Usage: `!mates [user|ign] [best|worst|both] [-m games] [champion|role] [filters]`\n"
+            "Examples:\n"
+            "- `!mates me`\n"
+            "- `!mates Eagle best`\n"
+            "- `!mates me worst -m 5`\n"
+            "- `!mates me support season 4`\n"
+            "- `!mates me nando map jaguar falls`"
+        ),
+    )
+    async def mates_cmd(self, ctx, *args):
+        start_time = time.monotonic()
+        args = list(args)
+        target_user = ctx.author
+        mode = "both"
+        min_games = 1
+        limit = 10
+
+        if args:
+            try:
+                target_user = await PlayerConverter().convert(ctx, args[0])
+                args = args[1:]
+            except commands.BadArgument:
+                pass
+
+        filter_candidate_args = []
+        i = 0
+        while i < len(args):
+            arg = str(args[i]).lower()
+            if arg in {"best", "top"}:
+                mode = "best"
+            elif arg in {"worst", "bottom"}:
+                mode = "worst"
+            elif arg in {"both", "all"}:
+                mode = "both"
+            elif arg == "-m":
+                if i + 1 >= len(args) or not str(args[i + 1]).isdigit():
+                    await ctx.send("`-m` needs a number after it, like `!mates me -m 5`.")
+                    return
+                min_games = max(1, int(args[i + 1]))
+                i += 1
+            elif arg.isdigit() and (i == 0 or str(args[i - 1]).lower() not in {"season", "last", "time"}):
+                limit = max(1, min(20, int(arg)))
+            else:
+                filter_candidate_args.append(args[i])
+            i += 1
+
+        unprocessed_args, match_filters, filter_error = await _extract_match_filters(ctx, filter_candidate_args)
+        if filter_error:
+            await ctx.send(filter_error)
+            return
+
+        role_filter = None
+        champion_filter = None
+        if unprocessed_args:
+            filter_str = " ".join(str(arg) for arg in unprocessed_args)
+            role_filter = resolve_role_name(filter_str)
+            if not role_filter:
+                champion_filter = resolve_champion_name(filter_str)
+                if not champion_filter:
+                    await ctx.send(f"No champion or role found matching `{filter_str}`.")
+                    return
+
+        player_id = resolve_player_id(target_user)
+        if not player_id:
+            await ctx.send(f"No stats found for {target_user.display_name}. They may need to link their IGN using `!link <ign>`.")
+            return
+
+        best_rows = get_teammate_records(
+            player_id, limit=limit, show_bottom=False, min_games=min_games,
+            champion=champion_filter, role=role_filter, filters=match_filters,
+        ) if mode in {"best", "both"} else []
+        worst_rows = get_teammate_records(
+            player_id, limit=limit, show_bottom=True, min_games=min_games,
+            champion=champion_filter, role=role_filter, filters=match_filters,
+        ) if mode in {"worst", "both"} else []
+
+        if not best_rows and not worst_rows:
+            await ctx.send(f"No teammate records found for {target_user.display_name}{_title_filter_suffix(match_filters)}.")
+            return
+
+        title_bits = [f"Teammates for {target_user.display_name}"]
+        if champion_filter:
+            title_bits.append(f"as {champion_filter}")
+        elif role_filter:
+            title_bits.append(f"as {role_filter}")
+
+        embed = discord.Embed(
+            title=" ".join(title_bits) + _title_filter_suffix(match_filters),
+            color=discord.Color.blue(),
+        )
+        if best_rows:
+            embed.add_field(name="Best", value="```\n" + "\n".join(self._format_mate_rows(best_rows)) + "\n```", inline=False)
+        if worst_rows:
+            embed.add_field(name="Worst", value="```\n" + "\n".join(self._format_mate_rows(worst_rows)) + "\n```", inline=False)
+
+        footer_parts = [f"Minimum {min_games} game{'s' if min_games != 1 else ''}", f"Fetched in {int((time.monotonic() - start_time) * 1000)}ms"]
+        active_filters = _filter_summary(match_filters)
+        if active_filters:
+            footer_parts.append("Filters: " + "; ".join(active_filters))
+        embed.set_footer(text="   •   ".join(footer_parts), icon_url=ctx.guild.icon.url if ctx.guild and ctx.guild.icon else None)
+        await ctx.send(embed=embed)
+
+    @app_commands.command(name="mates", description="Show best and worst teammates by winrate together.")
+    @app_commands.describe(
+        user="Discord member to view. Leave empty for yourself.",
+        player="IGN or Discord ID, useful for unlinked players.",
+        mode="Show both, best only, or worst only.",
+        min_games="Minimum games together.",
+        limit="Rows per section, max 20.",
+        role_or_champion="Role or champion you played, e.g. support, point tank, nando.",
+        time_range="Matches recorded in the last N days.",
+        since="Custom start date: YYYY-MM-DD.",
+        until="Custom end date: YYYY-MM-DD.",
+        map_name="Map name, e.g. Jaguar Falls.",
+        result="Wins or losses only.",
+        team="Draft side/team filter.",
+        score="Score filter.",
+        with_player="Only matches on the same team as this member.",
+        against_player="Only matches against this member.",
+    )
+    async def mates_slash(
+        self,
+        interaction: discord.Interaction,
+        user: discord.Member = None,
+        player: str = None,
+        mode: MateMode = "both",
+        min_games: int = 1,
+        limit: int = 10,
+        role_or_champion: str = None,
+        time_range: TimeRange = None,
+        since: str = None,
+        until: str = None,
+        map_name: str = None,
+        result: ResultFilter = None,
+        team: TeamFilter = None,
+        score: ScoreFilter = None,
+        with_player: discord.Member = None,
+        against_player: discord.Member = None,
+    ):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        try:
+            target_user = await self._slash_target(interaction, user, player)
+            args = [mode, str(max(1, min(20, limit))), "-m", str(max(1, min_games))]
+            args.extend(_split_words(role_or_champion))
+            args.extend(_slash_filter_args(
+                time_range=time_range,
+                since=since,
+                until=until,
+                map_name=map_name,
+                result=result,
+                team=team,
+                score=score,
+                with_player=with_player,
+                against_player=against_player,
+            ))
+            target_arg = str(target_user.id) if getattr(target_user, "id", None) else target_user.display_name
+            await self.mates_cmd.callback(self, ctx, target_arg, *args)
+        except commands.BadArgument as exc:
+            await ctx.send(str(exc))
 
     @commands.command(
         name="stats",

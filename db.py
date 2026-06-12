@@ -1218,6 +1218,73 @@ def compare_players(discord_id1, discord_id2):
     pid2 = get_player_id(discord_id2)
     return compare_by_player_ids(pid1, pid2)
 
+def get_teammate_records(player_id, limit=10, show_bottom=False, min_games=1, champion=None, role=None, filters=None):
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        where_conditions = ["ps.player_id = ?", "mate.player_id != ps.player_id"]
+        params = [player_id]
+
+        if champion:
+            champion = resolve_champion_name(champion) or champion
+            where_conditions.append("ps.champ LIKE ?")
+            params.append(f"%{champion}%")
+        elif role:
+            champions_in_role = get_champions_for_role(role)
+            if not champions_in_role:
+                return []
+            placeholders = ", ".join("?" for _ in champions_in_role)
+            where_conditions.append(f"ps.champ IN ({placeholders})")
+            params.extend(champions_in_role)
+
+        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+        where_clause = " AND ".join(where_conditions)
+        order = "ASC" if show_bottom else "DESC"
+        final_params = params + [min_games, limit]
+
+        cursor.execute(f"""
+            SELECT
+                teammate.player_id,
+                teammate.player_ign,
+                teammate.discord_id,
+                COUNT(ps.match_id) AS games,
+                SUM(CASE
+                    WHEN (ps.team = 1 AND m.team1_score > m.team2_score)
+                      OR (ps.team = 2 AND m.team2_score > m.team1_score)
+                    THEN 1 ELSE 0
+                END) AS wins
+            FROM player_stats ps
+            JOIN matches m ON ps.match_id = m.match_id
+            JOIN player_stats mate
+              ON ps.match_id = mate.match_id
+             AND ps.team = mate.team
+             AND ps.player_id != mate.player_id
+            JOIN players teammate ON mate.player_id = teammate.player_id
+            WHERE {where_clause}
+            GROUP BY teammate.player_id, teammate.player_ign, teammate.discord_id
+            HAVING games >= ?
+            ORDER BY (wins * 100.0 / games) {order}, games DESC, teammate.player_ign COLLATE NOCASE ASC
+            LIMIT ?;
+        """, final_params)
+
+        rows = []
+        for row in cursor.fetchall():
+            games = row["games"] or 0
+            wins = row["wins"] or 0
+            rows.append({
+                "player_id": row["player_id"],
+                "player_ign": row["player_ign"],
+                "discord_id": row["discord_id"],
+                "games": games,
+                "wins": wins,
+                "losses": games - wins,
+                "winrate": round(wins * 100.0 / games, 2) if games else 0,
+            })
+        return rows
+    finally:
+        conn.close()
+
 def get_match_history(player_id, limit: int = 30, filters=None):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
