@@ -1219,11 +1219,24 @@ def compare_players(discord_id1, discord_id2):
     return compare_by_player_ids(pid1, pid2)
 
 def get_teammate_records(player_id, limit=10, show_bottom=False, min_games=1, champion=None, role=None, filters=None):
+    return get_player_relationship_records(
+        player_id, relation="with", limit=limit, show_bottom=show_bottom,
+        min_games=min_games, champion=champion, role=role, filters=filters,
+    )
+
+def get_enemy_records(player_id, limit=10, show_bottom=False, min_games=1, champion=None, role=None, filters=None):
+    return get_player_relationship_records(
+        player_id, relation="against", limit=limit, show_bottom=show_bottom,
+        min_games=min_games, champion=champion, role=role, filters=filters,
+    )
+
+def get_player_relationship_records(player_id, relation="with", limit=10, show_bottom=False, min_games=1, champion=None, role=None, filters=None):
     conn = sqlite3.connect("match_data.db")
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        where_conditions = ["ps.player_id = ?", "mate.player_id != ps.player_id"]
+        team_operator = "=" if relation == "with" else "!="
+        where_conditions = ["ps.player_id = ?", "other.player_id != ps.player_id"]
         params = [player_id]
 
         if champion:
@@ -1256,11 +1269,11 @@ def get_teammate_records(player_id, limit=10, show_bottom=False, min_games=1, ch
                 END) AS wins
             FROM player_stats ps
             JOIN matches m ON ps.match_id = m.match_id
-            JOIN player_stats mate
-              ON ps.match_id = mate.match_id
-             AND ps.team = mate.team
-             AND ps.player_id != mate.player_id
-            JOIN players teammate ON mate.player_id = teammate.player_id
+            JOIN player_stats other
+              ON ps.match_id = other.match_id
+             AND ps.team {team_operator} other.team
+             AND ps.player_id != other.player_id
+            JOIN players teammate ON other.player_id = teammate.player_id
             WHERE {where_clause}
             GROUP BY teammate.player_id, teammate.player_ign, teammate.discord_id
             HAVING games >= ?
@@ -1276,6 +1289,69 @@ def get_teammate_records(player_id, limit=10, show_bottom=False, min_games=1, ch
                 "player_id": row["player_id"],
                 "player_ign": row["player_ign"],
                 "discord_id": row["discord_id"],
+                "games": games,
+                "wins": wins,
+                "losses": games - wins,
+                "winrate": round(wins * 100.0 / games, 2) if games else 0,
+            })
+        return rows
+    finally:
+        conn.close()
+
+def get_related_champion_records(player_id, relation="with", limit=10, show_bottom=False, min_games=1, champion=None, role=None, filters=None):
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        team_operator = "=" if relation == "with" else "!="
+        where_conditions = ["ps.player_id = ?"]
+        params = [player_id]
+
+        if champion:
+            champion = resolve_champion_name(champion) or champion
+            where_conditions.append("other.champ = ?")
+            params.append(champion)
+        elif role:
+            champions_in_role = get_champions_for_role(role)
+            if not champions_in_role:
+                return []
+            placeholders = ", ".join("?" for _ in champions_in_role)
+            where_conditions.append(f"other.champ IN ({placeholders})")
+            params.extend(champions_in_role)
+
+        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+        where_clause = " AND ".join(where_conditions)
+        order = "ASC" if show_bottom else "DESC"
+        final_params = params + [min_games, limit]
+
+        cursor.execute(f"""
+            SELECT
+                other.champ,
+                COUNT(ps.match_id) AS games,
+                SUM(CASE
+                    WHEN (ps.team = 1 AND m.team1_score > m.team2_score)
+                      OR (ps.team = 2 AND m.team2_score > m.team1_score)
+                    THEN 1 ELSE 0
+                END) AS wins
+            FROM player_stats ps
+            JOIN matches m ON ps.match_id = m.match_id
+            JOIN player_stats other
+              ON ps.match_id = other.match_id
+             AND ps.team {team_operator} other.team
+             AND ps.player_id != other.player_id
+            WHERE {where_clause}
+            GROUP BY other.champ
+            HAVING games >= ?
+            ORDER BY (wins * 100.0 / games) {order}, games DESC, other.champ COLLATE NOCASE ASC
+            LIMIT ?;
+        """, final_params)
+
+        rows = []
+        for row in cursor.fetchall():
+            games = row["games"] or 0
+            wins = row["wins"] or 0
+            rows.append({
+                "champ": row["champ"],
                 "games": games,
                 "wins": wins,
                 "losses": games - wins,
