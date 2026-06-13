@@ -10,6 +10,46 @@ CHAMPION_NAME_FIXES = {
     "Ghrok": "Grohk",
 }
 
+EXCLUDED_MAP_DISPLAY_NAMES = {"Trade District Classic"}
+
+MAP_POOL_DISPLAY_NAMES = {
+    "Ascension Peak",
+    "Bazaar",
+    "Brightmarsh",
+    "Dawnforge",
+    "Fish Market",
+    "Frog Isle",
+    "Frozen Guard",
+    "Ice Mines",
+    "Jaguar Falls",
+    "Serpent Beach",
+    "Shattered Desert",
+    "Splitstone Quarry",
+    "Stone Keep",
+    "Timber Mill",
+    "Warder's Gate",
+}
+
+MAP_DISPLAY_ALIASES = {
+    "Dawn Forge": "Dawnforge",
+    "Dawnforge": "Dawnforge",
+    "Fish Market": "Fish Market",
+    "Frozen Guard": "Frozen Guard",
+    "Serpent Beach": "Serpent Beach",
+    "Serpent Beach V2": "Serpent Beach",
+    "Stone Keep": "Stone Keep",
+    "Stone Keep (Day)": "Stone Keep",
+    "Stone Keep (Night)": "Stone Keep",
+    "Trade District": "Trade District Classic",
+    "Trade District Classic": "Trade District Classic",
+    "Warder's Gate": "Warder's Gate",
+    "Warder's Gate Custom": "Warder's Gate",
+    "Warder Gate": "Warder's Gate",
+    "Warder Gate Custom": "Warder's Gate",
+    "Warders Gate": "Warder's Gate",
+    "Warders Gate Custom": "Warder's Gate",
+}
+
 
 def _norm(value):
     """Return the NFC form of a string, trimmed of surrounding whitespace.
@@ -27,6 +67,18 @@ def _norm_lower(value):
     """NFC-normalised, lower-cased key for case-insensitive equality checks."""
     norm = _norm(value)
     return norm.lower() if norm is not None else ""
+
+
+def display_map_name(map_name):
+    normalized = _norm(map_name)
+    return MAP_DISPLAY_ALIASES.get(normalized, normalized)
+
+
+def related_map_names(map_name):
+    display_name = display_map_name(map_name)
+    names = {map_name, display_name}
+    names.update(raw_name for raw_name, shown_name in MAP_DISPLAY_ALIASES.items() if shown_name == display_name)
+    return sorted(name for name in names if name)
 
 
 def _strip_wrapping_quotes(value):
@@ -70,8 +122,10 @@ def _apply_match_filters(where_conditions, params, filters=None, player_alias="p
         params.append(filters["registered_before"])
 
     if filters.get("map"):
-        where_conditions.append("m.map = ?")
-        params.append(filters["map"])
+        map_names = related_map_names(filters["map"])
+        placeholders = ", ".join("?" for _ in map_names)
+        where_conditions.append(f"m.map IN ({placeholders})")
+        params.extend(map_names)
 
     if filters.get("result") == "wins":
         where_conditions.append(_win_condition(player_alias))
@@ -706,11 +760,49 @@ def queue_exists(queue_num):
 
 def resolve_map_name(partial_name):
     def map_key(value):
-        return " ".join(re.sub(r"[^a-z0-9]+", " ", _norm_lower(value)).split())
+        return " ".join(re.sub(r"[^a-z0-9]+", " ", _norm_lower(value).replace("'", "")).split())
 
     needle = map_key(partial_name)
     if not needle:
         return None
+
+    known_display_maps = {
+        *MAP_POOL_DISPLAY_NAMES,
+        *(display_name for display_name in MAP_DISPLAY_ALIASES.values() if display_name not in EXCLUDED_MAP_DISPLAY_NAMES),
+    }
+    for display_name in known_display_maps:
+        if map_key(display_name) == needle:
+            return display_name
+
+    for raw_name, display_name in MAP_DISPLAY_ALIASES.items():
+        if display_name in EXCLUDED_MAP_DISPLAY_NAMES:
+            continue
+        if map_key(raw_name) == needle:
+            return display_name
+
+    display_matches = [display_name for display_name in known_display_maps if needle in map_key(display_name)]
+    if len(display_matches) == 1:
+        return display_matches[0]
+
+    alias_matches = [
+        display_name
+        for raw_name, display_name in MAP_DISPLAY_ALIASES.items()
+        if display_name not in EXCLUDED_MAP_DISPLAY_NAMES and needle in map_key(raw_name)
+    ]
+    if len(set(alias_matches)) == 1:
+        return alias_matches[0]
+
+    display_starts = [display_name for display_name in known_display_maps if map_key(display_name).startswith(needle)]
+    if len(display_starts) == 1:
+        return display_starts[0]
+
+    alias_starts = [
+        display_name
+        for raw_name, display_name in MAP_DISPLAY_ALIASES.items()
+        if display_name not in EXCLUDED_MAP_DISPLAY_NAMES and map_key(raw_name).startswith(needle)
+    ]
+    if len(set(alias_starts)) == 1:
+        return alias_starts[0]
 
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
@@ -720,13 +812,32 @@ def resolve_map_name(partial_name):
     finally:
         conn.close()
 
+    display_to_raw = {}
+    for map_name in maps:
+        display_name = display_map_name(map_name)
+        if display_name in EXCLUDED_MAP_DISPLAY_NAMES:
+            continue
+        display_to_raw.setdefault(display_name, map_name)
+
+    for display_name, raw_name in display_to_raw.items():
+        if map_key(display_name) == needle:
+            return raw_name
+
     for map_name in maps:
         if map_key(map_name) == needle:
             return map_name
 
+    display_matches = [raw_name for display_name, raw_name in display_to_raw.items() if needle in map_key(display_name)]
+    if len(display_matches) == 1:
+        return display_matches[0]
+
     matches = [map_name for map_name in maps if needle in map_key(map_name)]
     if len(matches) == 1:
         return matches[0]
+
+    display_starts = [raw_name for display_name, raw_name in display_to_raw.items() if map_key(display_name).startswith(needle)]
+    if len(display_starts) == 1:
+        return display_starts[0]
 
     starts = [map_name for map_name in maps if map_key(map_name).startswith(needle)]
     if len(starts) == 1:
@@ -1392,15 +1503,19 @@ def get_match_history(player_id, limit: int = 30, filters=None):
 
 def _get_all_map_names(cursor):
     cursor.execute("SELECT DISTINCT map FROM matches WHERE map IS NOT NULL AND TRIM(map) != '' ORDER BY map ASC;")
-    return sorted({_display_map_name(row[0]) for row in cursor.fetchall()}, key=str.lower)
+    return sorted(
+        MAP_POOL_DISPLAY_NAMES
+        | {
+            _display_map_name(row[0])
+            for row in cursor.fetchall()
+            if _display_map_name(row[0]) not in EXCLUDED_MAP_DISPLAY_NAMES
+        },
+        key=str.lower,
+    )
 
 
 def _display_map_name(map_name):
-    if map_name in {"Stone Keep (Day)", "Stone Keep (Night)"}:
-        return "Stone Keep"
-    if map_name in {"Serpent Beach", "Serpent Beach V2"}:
-        return "Serpent Beach"
-    return map_name
+    return display_map_name(map_name)
 
 
 def _map_winrate_rows(cursor, query, params, min_games=1, include_all_maps=True, sort_by_winrate=False):
@@ -1409,6 +1524,8 @@ def _map_winrate_rows(cursor, query, params, min_games=1, include_all_maps=True,
     rows_by_map = {}
     for row in cursor.fetchall():
         map_name = _display_map_name(row["map"])
+        if map_name in EXCLUDED_MAP_DISPLAY_NAMES:
+            continue
         wins = row["wins"] or 0
         games = row["games"] or 0
         existing = rows_by_map.setdefault(map_name, {"map": map_name, "games": 0, "wins": 0, "losses": 0, "winrate": 0})
