@@ -559,6 +559,10 @@ def _split_champion_pair(args):
     return None, None
 
 
+def _strip_rating_suffix(name):
+    return re.sub(r"\s*-\s*\(\d{3,5}\)\s*$", "", str(name or "")).strip()
+
+
 class Stats(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
@@ -883,7 +887,7 @@ class Stats(commands.Cog):
         await interaction.response.send_message(embed=self._examples_embed("filters"))
 
     def _table_name(self, value, width=14):
-        raw = re.sub(r"\\u[0-9a-fA-F]{4}", "", str(value or "Unknown"))
+        raw = re.sub(r"\\u[0-9a-fA-F]{4}", "", _strip_rating_suffix(value) or "Unknown")
         normalized = unicodedata.normalize("NFKD", raw)
         ascii_name = normalized.encode("ascii", "ignore").decode("ascii")
         clean = re.sub(r"\s+", " ", ascii_name).strip() or "Unknown"
@@ -900,7 +904,7 @@ class Stats(commands.Cog):
                 if member:
                     break
             if member:
-                return getattr(member, "display_name", None) or getattr(member, "name", None) or row.get("player_ign")
+                return _strip_rating_suffix(getattr(member, "display_name", None) or getattr(member, "name", None)) or row.get("player_ign")
         return row.get("player_ign") or "Unknown"
 
     async def _with_display_names(self, rows):
@@ -2943,7 +2947,7 @@ Shows player rankings, with optional filters for champions or roles.
             discord_id = data_row['discord_id']
             value = data_row['value']
             member = ctx.guild.get_member(int(discord_id))
-            name = member.display_name if member else data_row['player_ign']
+            name = _strip_rating_suffix(member.display_name) if member else data_row['player_ign']
             
             rank = (data_row['total_players'] - i) if show_bottom else (i + 1)
             formatted_value = formatter(value, data_row)
