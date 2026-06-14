@@ -365,6 +365,21 @@ async def _extract_match_filters(ctx, args):
         raw_key = arg.lower()
         key = _compact_arg(arg)
 
+        if raw_key == "-m":
+            remaining.append(arg)
+            if i + 1 < len(args) and str(args[i + 1]).isdigit():
+                remaining.append(str(args[i + 1]))
+                i += 2
+            else:
+                i += 1
+            continue
+
+        inline_min_games = re.fullmatch(r"-m(\d+)", raw_key)
+        if inline_min_games:
+            remaining.extend(["-m", inline_min_games.group(1)])
+            i += 1
+            continue
+
         season = _season_key(arg)
         consumed_until = i + 1
         if key == "season":
