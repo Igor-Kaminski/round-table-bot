@@ -151,6 +151,32 @@ def _apply_match_filters(where_conditions, params, filters=None, player_alias="p
     elif filters.get("score_category") == "sweep":
         where_conditions.append("ABS(m.team1_score - m.team2_score) = 4")
 
+    for champ in filters.get("vs_champions", []):
+        where_conditions.append(
+            f"""
+            EXISTS (
+                SELECT 1 FROM player_stats enemy_champ_ps
+                WHERE enemy_champ_ps.match_id = {player_alias}.match_id
+                  AND enemy_champ_ps.champ = ?
+                  AND enemy_champ_ps.team != {player_alias}.team
+            )
+            """
+        )
+        params.append(champ)
+
+    for champ in filters.get("not_vs_champions", []):
+        where_conditions.append(
+            f"""
+            NOT EXISTS (
+                SELECT 1 FROM player_stats enemy_champ_ps
+                WHERE enemy_champ_ps.match_id = {player_alias}.match_id
+                  AND enemy_champ_ps.champ = ?
+                  AND enemy_champ_ps.team != {player_alias}.team
+            )
+            """
+        )
+        params.append(champ)
+
     if filters.get("with_player_id"):
         where_conditions.append(
             f"""
@@ -1699,8 +1725,15 @@ def get_champion_overall_stats(champion, filters=None):
             "taken_pm": round((row["taken"] or 0) / minutes, 2),
             "hpm": round(healing / minutes, 2),
             "self_heal_pm": round((row["self_healing"] or 0) / minutes, 2),
-            "shield_avg": round((row["shielding"] or 0) / games),
             "credits_pm": round((row["credits"] or 0) / minutes, 2),
+            "avg_kills": round((row["kills"] or 0) / games, 2),
+            "avg_deaths": round((row["deaths"] or 0) / games, 2),
+            "avg_damage": round(damage / games),
+            "avg_taken": round((row["taken"] or 0) / games),
+            "avg_healing": round(healing / games),
+            "avg_self_healing": round((row["self_healing"] or 0) / games),
+            "shield_avg": round((row["shielding"] or 0) / games),
+            "avg_credits": round((row["credits"] or 0) / games),
             "obj_avg": round((row["objective_time"] or 0) / games, 2),
             "damage_healed_pct": round(healing * 100.0 / enemy_damage, 2) if enemy_damage > 0 else 0,
             "kp": round(row["kp"] or 0, 2),

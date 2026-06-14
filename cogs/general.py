@@ -47,6 +47,7 @@ class General(commands.Cog):
             ("clb", "Champion leaderboard across roles and filters."),
             ("map", "Shortcut leaderboard for one map."),
             ("mapwr", "A player's winrate on every map."),
+            ("cstats", "Overall server stats for one champion."),
             ("champmapwr", "One champion's record on every map."),
             ("champcompare", "Compare two champions overall and by map."),
         ],

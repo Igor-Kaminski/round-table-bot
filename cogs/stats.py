@@ -69,8 +69,17 @@ def _avatar_url(target_user):
 
 def get_champion_icon_path(champion_name):
     """Formats a champion name into a valid file path for its icon."""
-    formatted_name = champion_name.lower().replace(" ", "_").replace("'", "")
-    return os.path.join("icons", "champ_icons", f"{formatted_name}.png")
+    base = champion_name.lower().replace("'", "")
+    candidates = [
+        base.replace(" ", "_"),
+        base.replace(" ", "-"),
+        base.replace(" ", ""),
+    ]
+    for formatted_name in candidates:
+        path = os.path.join("icons", "champ_icons", f"{formatted_name}.png")
+        if os.path.exists(path):
+            return path
+    return os.path.join("icons", "champ_icons", f"{candidates[0]}.png")
 
 
 RESULT_FILTER_ALIASES = {
@@ -119,7 +128,7 @@ SEASON_FILTERS = {
 }
 
 FILTER_KEYWORDS = {
-    "map", "with", "against",
+    "map", "with", "against", "vs", "versus", "notvs", "notversus",
     *TIME_FILTER_KEYWORDS,
     *RESULT_FILTER_ALIASES.keys(),
     *TEAM_FILTER_ALIASES.keys(),
@@ -267,6 +276,10 @@ def _filter_summary(filters):
         labels.append("Stomps")
     elif filters.get("score_category") == "sweep":
         labels.append("Sweeps")
+    for champ in filters.get("vs_champions", []):
+        labels.append(f"Vs {champ}")
+    for champ in filters.get("not_vs_champions", []):
+        labels.append(f"Not Vs {champ}")
     if filters.get("with_player_name"):
         labels.append(f"With {filters['with_player_name']}")
     if filters.get("against_player_name"):
@@ -296,6 +309,10 @@ def _title_filter_suffix(filters):
         parts.append("in Stomps")
     elif filters.get("score_category") == "sweep":
         parts.append("in Sweeps")
+    for champ in filters.get("vs_champions", []):
+        parts.append(f"vs {champ}")
+    for champ in filters.get("not_vs_champions", []):
+        parts.append(f"not vs {champ}")
     if filters.get("with_player_name"):
         parts.append(f"with {filters['with_player_name']}")
     if filters.get("against_player_name"):
@@ -518,6 +535,28 @@ async def _extract_match_filters(ctx, args):
             i += 1
             continue
 
+        if key in {"vs", "versus", "notvs", "notversus"} or (key == "not" and i + 1 < len(args) and _compact_arg(args[i + 1]) in {"vs", "versus"}):
+            negated_vs = key in {"notvs", "notversus"} or key == "not"
+            champion_start = i + 2 if key == "not" else i + 1
+            if champion_start >= len(args):
+                return remaining, filters, f"`{arg}` needs a champion after it."
+            resolved_champion = None
+            consumed_until = champion_start
+            for end in range(len(args), champion_start, -1):
+                candidate = " ".join(str(part) for part in args[champion_start:end])
+                resolved_champion = resolve_champion_name(candidate)
+                if resolved_champion:
+                    consumed_until = end
+                    break
+            if not resolved_champion:
+                return remaining, filters, f"Could not find a champion matching `{args[champion_start]}`."
+            filter_key = "not_vs_champions" if negated_vs else "vs_champions"
+            filters.setdefault(filter_key, [])
+            if resolved_champion not in filters[filter_key]:
+                filters[filter_key].append(resolved_champion)
+            i = consumed_until
+            continue
+
         if key in {"with", "against"}:
             if i + 1 >= len(args):
                 return remaining, filters, f"`{arg}` needs a player after it."
@@ -607,6 +646,8 @@ class Stats(commands.Cog):
             "map": "Map Examples",
             "mapwr": "Map Winrate Examples",
             "champmapwr": "Champion Map Winrate Examples",
+            "cstats": "Champion Stats Examples",
+            "champstats": "Champion Stats Examples",
             "champcompare": "Champion Compare Examples",
             "mates": "Teammate Examples",
             "teammates": "Teammate Examples",
@@ -625,6 +666,7 @@ class Stats(commands.Cog):
                 "`!examples top` - Personal champion table examples.",
                 "`!examples mapwr` - Player map winrate examples.",
                 "`!examples champmapwr` - Champion map winrate examples.",
+                "`!examples cstats` - Overall champion stat examples.",
                 "`!examples champcompare` - Champion comparison examples.",
                 "`!examples mates` - Best and worst teammate examples.",
                 "`!examples enemies` - Enemy player matchup examples.",
@@ -734,6 +776,14 @@ class Stats(commands.Cog):
                 "`!cmapwr ying losses` - Ying map records in losses only.",
                 "`!champmapwr khan -wr` - Khan map WR sorted by winrate.",
             ],
+            "cstats": [
+                "`!cstats koga` - Overall Koga stats across the server.",
+                "`!cstats nando s4` - Fernando stats from Season 4.",
+                "`!cstats nando vs koga` - Fernando stats only when the enemy team had Koga.",
+                "`!cstats nando notvs lex` - Fernando stats when the enemy team did not have Lex.",
+                "`!cstats nando vs koga notvs lex` - Stack multiple champion matchup filters.",
+                "`!cstats bk map jaguar falls season 3` - Bomb King stats on Jaguar Falls in Season 3.",
+            ],
             "champcompare": [
                 "`!champcompare atlas khan` - Compare Atlas and Khan overall plus map records.",
                 "`!champcompare pip damba` - Compare Pip and Mal'Damba support stats.",
@@ -782,6 +832,8 @@ class Stats(commands.Cog):
                 "`map <name>` - Map filter, e.g. `!lb wr ying map jaguar falls`.",
                 "`with <player>` - Same team, e.g. `!lb wr barik with pjamo`.",
                 "`against <player>` - Enemy team, e.g. `!lb wr ash against nozy`.",
+                "`vs <champion>` - Enemy team has that champion, e.g. `!cstats nando vs koga`.",
+                "`notvs <champion>` - Enemy team does not have that champion, e.g. `!lb wr nando notvs lex`.",
             ],
             "aliases": [
                 "`bk` = Bomb King, e.g. `!lb dmg bk`.",
@@ -810,6 +862,8 @@ class Stats(commands.Cog):
             "champmap": "champmapwr",
             "championmapwr": "champmapwr",
             "cmapwr": "champmapwr",
+            "champstats": "cstats",
+            "championstats": "cstats",
             "cc": "champcompare",
             "ccompare": "champcompare",
             "champcmp": "champcompare",
@@ -865,6 +919,8 @@ class Stats(commands.Cog):
                 value=(
                     "`with <player>` - same team as that player.\n"
                     "`against <player>` - enemy team against that player.\n"
+                    "`vs <champion>` - enemy team has that champion.\n"
+                    "`notvs <champion>` - enemy team does not have that champion.\n"
                     "Example: `!lb wr barik last 7d map brightmarsh with pjamo`."
                 ),
                 inline=False,
@@ -877,7 +933,7 @@ class Stats(commands.Cog):
         name="examples",
         aliases=["example"],
         help=(
-            "Show useful command examples. Usage: `!examples [stats|top|lb|clb|map|mapwr|champmapwr|mates|enemies|withchamps|filters|aliases]`.\n"
+            "Show useful command examples. Usage: `!examples [stats|top|lb|clb|map|mapwr|champmapwr|cstats|mates|enemies|withchamps|filters|aliases]`.\n"
             "Examples: `!examples`, `!examples lb`, `!examples mates`, `!examples enemies`, `!examples filters`, `!examples mapwr`."
         ),
     )
@@ -885,7 +941,7 @@ class Stats(commands.Cog):
         await ctx.send(embed=self._examples_embed(topic))
 
     @app_commands.command(name="examples", description="Show useful command examples.")
-    @app_commands.describe(topic="Optional topic: stats, top, lb, clb, mapwr, champmapwr, mates, enemies, withchamps, filters, aliases")
+    @app_commands.describe(topic="Optional topic: stats, top, lb, clb, mapwr, champmapwr, cstats, mates, enemies, withchamps, filters, aliases")
     async def examples_slash(self, interaction: discord.Interaction, topic: str = None):
         await interaction.response.send_message(embed=self._examples_embed(topic))
 
@@ -900,6 +956,128 @@ class Stats(commands.Cog):
     @app_commands.command(name="filters", description="Show available match filters.")
     async def filters_slash(self, interaction: discord.Interaction):
         await interaction.response.send_message(embed=self._examples_embed("filters"))
+
+    @commands.command(
+        name="cstats",
+        aliases=["champstats", "championstats"],
+        help=(
+            "Show overall server stats for a champion.\n"
+            "Usage: `!cstats <champion> [filters]`\n"
+            "Examples:\n"
+            "- `!cstats koga`\n"
+            "- `!cstats nando s4`\n"
+            "- `!cstats nando vs koga`\n"
+            "- `!cstats nando vs koga notvs lex`\n"
+            "- `!cstats bk map jaguar falls season 3`"
+        ),
+    )
+    async def champion_stats_cmd(self, ctx, *args):
+        start_time = time.monotonic()
+        args, match_filters, filter_error = await _extract_match_filters(ctx, args)
+        if filter_error:
+            await ctx.send(filter_error)
+            return
+
+        if not args:
+            await ctx.send("Usage: `!cstats <champion> [filters]`, like `!cstats koga` or `!cstats nando vs koga`.")
+            return
+
+        champion_input = " ".join(str(arg) for arg in args)
+        champion_name = resolve_champion_name(champion_input)
+        if not champion_name:
+            await ctx.send(f"No champion found matching `{champion_input}`.")
+            return
+
+        stats = get_champion_overall_stats(champion_name, filters=match_filters)
+        if not stats or not stats["games"]:
+            await ctx.send(f"No champion stats found for {champion_name}{_title_filter_suffix(match_filters)}.")
+            return
+
+        data = {
+            f"--- Champion: {champion_name} ({stats['games']} games) ---": "",
+            "Winrate": f"{stats['winrate']:.2f}% ({stats['wins']}-{stats['losses']})",
+            "KDA": f"{stats['kda']:.2f} ({stats['raw_k']}/{stats['raw_d']}/{stats['raw_a']})",
+            "Kill Participation": f"{stats['kp']:.2f}%",
+            "Damage Share": f"{stats['dmg_share']:.2f}%",
+            "Damage Healed": f"{stats['damage_healed_pct']:.2f}%",
+            "--- Per Minute ---": "",
+            "Damage/Min": f"{int(stats['dpm']):,}",
+            "Damage Taken/Min": f"{int(stats['taken_pm']):,}",
+            "Healing/Min": f"{int(stats['hpm']):,}",
+            "Self Healing/Min": f"{int(stats['self_heal_pm']):,}",
+            "Credits/Min": f"{int(stats['credits_pm']):,}",
+            "--- Per Match ---": "",
+            "AVG Kills": f"{stats['avg_kills']:.2f}",
+            "AVG Deaths": f"{stats['avg_deaths']:.2f}",
+            "AVG Damage Dealt": f"{int(stats['avg_damage']):,}",
+            "AVG Damage Taken": f"{int(stats['avg_taken']):,}",
+            "AVG Healing": f"{int(stats['avg_healing']):,}",
+            "AVG Self Healing": f"{int(stats['avg_self_healing']):,}",
+            "AVG Shielding": f"{int(stats['shield_avg']):,}",
+            "AVG Credits": f"{int(stats['avg_credits']):,}",
+            "AVG Objective Time": f"{int(stats['obj_avg']):,}",
+        }
+
+        icon_file = None
+        embed = discord.Embed(
+            title=f"Champion Stats for {champion_name}{_title_filter_suffix(match_filters)}",
+            color=discord.Color.blue(),
+        )
+        embed.description = "```\n" + "\n".join(_format_stat_block(data)) + "\n```"
+        icon_path = get_champion_icon_path(champion_name)
+        if os.path.exists(icon_path):
+            icon_file = discord.File(icon_path, filename="champ_icon.png")
+            embed.set_thumbnail(url="attachment://champ_icon.png")
+
+        footer_parts = [f"Fetched in {int((time.monotonic() - start_time) * 1000)}ms"]
+        active_filters = _filter_summary(match_filters)
+        if active_filters:
+            footer_parts.append("Filters: " + "; ".join(active_filters))
+        embed.set_footer(text="   •   ".join(footer_parts), icon_url=ctx.guild.icon.url if ctx.guild and ctx.guild.icon else None)
+        await ctx.send(embed=embed, file=icon_file)
+
+    @app_commands.command(name="cstats", description="Show overall server stats for a champion.")
+    @app_commands.describe(
+        champion="Champion name.",
+        time_range="Matches recorded in the last N days.",
+        since="Custom start date: YYYY-MM-DD.",
+        until="Custom end date: YYYY-MM-DD.",
+        map_name="Map name, e.g. Jaguar Falls.",
+        result="Wins or losses only.",
+        team="Draft side/team filter.",
+        score="Score filter.",
+        with_player="Only matches on the same team as this member.",
+        against_player="Only matches against this member.",
+    )
+    async def cstats_slash(
+        self,
+        interaction: discord.Interaction,
+        champion: str,
+        time_range: TimeRange = None,
+        since: str = None,
+        until: str = None,
+        map_name: str = None,
+        result: ResultFilter = None,
+        team: TeamFilter = None,
+        score: ScoreFilter = None,
+        with_player: discord.Member = None,
+        against_player: discord.Member = None,
+    ):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        args = _split_words(champion)
+        args.extend(_slash_filter_args(
+            time_range=time_range,
+            since=since,
+            until=until,
+            map_name=map_name,
+            result=result,
+            team=team,
+            score=score,
+            with_player=with_player,
+            against_player=against_player,
+        ))
+        await self.champion_stats_cmd.callback(self, ctx, *args)
 
     def _table_name(self, value, width=14):
         raw = re.sub(r"\\u[0-9a-fA-F]{4}", "", _strip_rating_suffix(value) or "Unknown")
