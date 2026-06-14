@@ -1209,7 +1209,7 @@ class Stats(commands.Cog):
 
     @commands.command(
         name="enemies",
-        aliases=["matchups"],
+        aliases=["enemys", "matchups"],
         help="Show best and worst enemy player matchups. Usage: `!enemies [user|ign] [best|worst|both] [-m games] [champion|role] [filters]`.",
     )
     async def enemies_cmd(self, ctx, *args):
