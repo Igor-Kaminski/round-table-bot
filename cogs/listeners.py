@@ -11,10 +11,20 @@ from db import (
     insert_scoreboard,
     get_registered_igns,
     insert_embed,
+    get_match_screenshot,
+    link_match_screenshot,
 )
 import easyocr
 import tempfile
 import os
+from utils.match_screenshots import (
+    MAX_SCREENSHOT_BYTES,
+    attachment_is_supported,
+    move_screenshot_file,
+    remove_screenshot_file,
+    resolve_screenshot_path,
+    screenshot_extension,
+)
 
 MATCH_DATA_COMMAND_RE = re.compile(r">>\s*match_data\s+(\d{9,12})", re.IGNORECASE)
 
@@ -238,9 +248,16 @@ class Listeners(commands.Cog):
             for attachment in message.attachments:
 
                 # Temporarily save attachments with the following file extensions
-                if attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg')):
-                    extension = os.path.splitext(attachment.filename)[1]
-                    img_path = f"temp_{attachment.id}{extension}"
+                extension = screenshot_extension(attachment.filename)
+                if extension:
+                    if not attachment_is_supported(attachment):
+                        await message.channel.send(
+                            f"Screenshot is too large. Maximum size is {MAX_SCREENSHOT_BYTES // (1024 * 1024)} MB."
+                        )
+                        continue
+
+                    fd, img_path = tempfile.mkstemp(suffix=extension)
+                    os.close(fd)
                     try:
                         await attachment.save(img_path)
 
@@ -249,9 +266,30 @@ class Listeners(commands.Cog):
 
                         # Send the match id in the chat if it was successfully extracted
                         if match_id:
+                            existing = get_match_screenshot(match_id)
+                            existing_path = resolve_screenshot_path(existing["file_path"]) if existing else None
+                            if not existing_path or not existing_path.exists():
+                                screenshot_path = move_screenshot_file(
+                                    img_path,
+                                    match_id,
+                                    attachment.id,
+                                    extension,
+                                )
+                                if not link_match_screenshot(
+                                    match_id,
+                                    screenshot_path,
+                                    source_url=attachment.url,
+                                    message_id=message.id,
+                                    attachment_id=attachment.id,
+                                    channel_id=message.channel.id,
+                                    created_at=int(message.created_at.timestamp()),
+                                ):
+                                    remove_screenshot_file(screenshot_path)
                             await message.channel.send(f">>match_data {match_id}")
                         else:
                             await message.channel.send("Match ID not found.")
+                    except ValueError as e:
+                        await message.channel.send(str(e))
                     finally:
                         if os.path.exists(img_path):
                             os.remove(img_path)

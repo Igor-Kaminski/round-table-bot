@@ -67,6 +67,7 @@ Prefix commands (`!`) and slash commands (`/`) are both supported.
 - `!stats [@user] [champion/role] [filters]` / `/stats` - View player statistics
 - `!top [@user]` / `/top` - Interactive champion breakdown
 - `!history [@user] [limit] [filters]` / `/history` - View recent match history
+- `!match <id>` / `/match` - Show the locally saved screenshot for a match ID
 - `!leaderboard [stat] [filters]` / `/leaderboard` - View server player rankings
 - `!champ_lb [stat] [role] [filters]` / `/champ_lb` - View champion rankings (all players combined)
 - `!compare @user1 [@user2]` / `/compare` - Compare two players
@@ -80,9 +81,13 @@ Time filters use when the bot recorded the match. Older matches from before this
 
 Incomplete match data from Hi-Rez/PaladinsAssistant is saved with `player_count` and `is_complete` metadata for audit/debugging. It still counts in normal stats and W/L calculations, but team-total stats can be less reliable when player rows are missing.
 
+OCR source images are stored locally in `match_screenshots/` and linked through the `match_screenshots` database table. Back up that folder together with `match_data.db`; Git intentionally ignores the image files.
+
 ### For Admins
 - `!ingest_text` - Manually add match data
 - `!delete_match <id>` - Remove a match from the database
+- `!add <id>` - Attach a screenshot to a match that does not have one
+- `!replace <id>` - Replace the saved screenshot for a match
 - `!add_alt @user <ign>` - Add alternate IGN for a player
 - `!query <sql>` - Execute database queries
 - And more...

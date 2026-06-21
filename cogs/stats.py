@@ -5,12 +5,22 @@ from discord import app_commands
 from discord.ext import commands
 import os
 import re
+import tempfile
 import time
 import unicodedata
 from datetime import datetime, timedelta
 from typing import Literal
 from utils.converters import PlayerConverter, resolve_player_id
 from utils.views import TopChampsView
+from utils.checks import is_exec
+from utils.match_screenshots import (
+    MAX_SCREENSHOT_BYTES,
+    attachment_is_supported,
+    move_screenshot_file,
+    remove_screenshot_file,
+    resolve_screenshot_path,
+    screenshot_extension,
+)
 from core.constants import CHAMPION_ROLES, get_champions_for_role, resolve_champion_name, resolve_role_name
 from db import (
     get_player_stats,
@@ -28,6 +38,9 @@ from db import (
     get_related_champion_records,
     get_teammate_records,
     get_top_champs,
+    get_match_screenshot,
+    link_match_screenshot,
+    match_exists,
     resolve_map_name,
 )
 
@@ -37,6 +50,51 @@ ResultFilter = Literal["wins", "losses"]
 TeamFilter = Literal["team1", "team2"]
 ScoreFilter = Literal["4-3", "close", "stomp", "sweep"]
 MateMode = Literal["both", "best", "worst"]
+
+
+def _first_image_attachment(ctx):
+    attachments = getattr(getattr(ctx, "message", None), "attachments", []) or []
+    for attachment in attachments:
+        if screenshot_extension(attachment.filename):
+            return attachment
+    return None
+
+
+async def _save_match_attachment(ctx, match_id, attachment):
+    if not attachment_is_supported(attachment):
+        return None, f"Screenshot must be a PNG or JPEG no larger than {MAX_SCREENSHOT_BYTES // (1024 * 1024)} MB."
+
+    extension = screenshot_extension(attachment.filename)
+    existing = get_match_screenshot(match_id)
+    old_path = existing["file_path"] if existing else None
+    fd, temp_path = tempfile.mkstemp(suffix=extension)
+    os.close(fd)
+    new_path = None
+    try:
+        await attachment.save(temp_path)
+        new_path = move_screenshot_file(temp_path, match_id, attachment.id, extension)
+        saved = link_match_screenshot(
+            match_id,
+            new_path,
+            source_url=attachment.url,
+            message_id=getattr(ctx.message, "id", None),
+            attachment_id=attachment.id,
+            channel_id=getattr(ctx.channel, "id", None),
+            created_at=int(ctx.message.created_at.timestamp()) if getattr(ctx.message, "created_at", None) else None,
+        )
+        if not saved:
+            remove_screenshot_file(new_path)
+            return None, "Could not link the screenshot in the database."
+        if old_path and old_path != new_path:
+            remove_screenshot_file(old_path)
+        return new_path, None
+    except (OSError, ValueError) as e:
+        if new_path:
+            remove_screenshot_file(new_path)
+        return None, str(e)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
 
 
 class SlashContext:
@@ -648,6 +706,9 @@ class Stats(commands.Cog):
             "champmapwr": "Champion Map Winrate Examples",
             "cstats": "Champion Stats Examples",
             "champstats": "Champion Stats Examples",
+            "match": "Match Screenshot Examples",
+            "matchss": "Match Screenshot Examples",
+            "screenshot": "Match Screenshot Examples",
             "champcompare": "Champion Compare Examples",
             "mates": "Teammate Examples",
             "teammates": "Teammate Examples",
@@ -667,6 +728,7 @@ class Stats(commands.Cog):
                 "`!examples mapwr` - Player map winrate examples.",
                 "`!examples champmapwr` - Champion map winrate examples.",
                 "`!examples cstats` - Overall champion stat examples.",
+                "`!examples match` - Saved match screenshot examples.",
                 "`!examples champcompare` - Champion comparison examples.",
                 "`!examples mates` - Best and worst teammate examples.",
                 "`!examples enemies` - Enemy player matchup examples.",
@@ -784,6 +846,13 @@ class Stats(commands.Cog):
                 "`!cstats nando vs koga notvs lex` - Stack multiple champion matchup filters.",
                 "`!cstats bk map jaguar falls season 3` - Bomb King stats on Jaguar Falls in Season 3.",
             ],
+            "match": [
+                "`!match 1280311793` - Show the saved screenshot for a match.",
+                "`!matchss 1280311793` - Alias for `!match`.",
+                "`!screenshot 1280311793` - Another alias for `!match`.",
+                "`!add 1280311793` - Exec: attach the first screenshot to a recorded match.",
+                "`!replace 1280311793` - Exec: replace a match screenshot.",
+            ],
             "champcompare": [
                 "`!champcompare atlas khan` - Compare Atlas and Khan overall plus map records.",
                 "`!champcompare pip damba` - Compare Pip and Mal'Damba support stats.",
@@ -864,6 +933,8 @@ class Stats(commands.Cog):
             "cmapwr": "champmapwr",
             "champstats": "cstats",
             "championstats": "cstats",
+            "matchss": "match",
+            "screenshot": "match",
             "cc": "champcompare",
             "ccompare": "champcompare",
             "champcmp": "champcompare",
@@ -933,15 +1004,15 @@ class Stats(commands.Cog):
         name="examples",
         aliases=["example"],
         help=(
-            "Show useful command examples. Usage: `!examples [stats|top|lb|clb|map|mapwr|champmapwr|cstats|mates|enemies|withchamps|filters|aliases]`.\n"
-            "Examples: `!examples`, `!examples lb`, `!examples mates`, `!examples enemies`, `!examples filters`, `!examples mapwr`."
+            "Show useful command examples. Usage: `!examples [stats|top|lb|clb|map|mapwr|champmapwr|cstats|match|mates|enemies|withchamps|filters|aliases]`.\n"
+            "Examples: `!examples`, `!examples lb`, `!examples match`, `!examples mates`, `!examples enemies`, `!examples filters`."
         ),
     )
     async def examples_cmd(self, ctx, *, topic: str = None):
         await ctx.send(embed=self._examples_embed(topic))
 
     @app_commands.command(name="examples", description="Show useful command examples.")
-    @app_commands.describe(topic="Optional topic: stats, top, lb, clb, mapwr, champmapwr, cstats, mates, enemies, withchamps, filters, aliases")
+    @app_commands.describe(topic="Optional topic: stats, top, lb, clb, mapwr, champmapwr, cstats, match, mates, enemies, filters")
     async def examples_slash(self, interaction: discord.Interaction, topic: str = None):
         await interaction.response.send_message(embed=self._examples_embed(topic))
 
@@ -956,6 +1027,81 @@ class Stats(commands.Cog):
     @app_commands.command(name="filters", description="Show available match filters.")
     async def filters_slash(self, interaction: discord.Interaction):
         await interaction.response.send_message(embed=self._examples_embed("filters"))
+
+    @commands.command(
+        name="match",
+        aliases=["matchss", "screenshot"],
+        help="Show the saved screenshot for a match ID. Usage: `!match <match_id>`.",
+    )
+    async def match_cmd(self, ctx, match_id: int):
+        screenshot = get_match_screenshot(match_id)
+        if not screenshot:
+            await ctx.send(f"No saved screenshot found for match `{match_id}`.")
+            return
+
+        file_path = resolve_screenshot_path(screenshot["file_path"])
+        if not file_path or not file_path.exists():
+            await ctx.send(f"The saved screenshot for match `{match_id}` is missing from disk.")
+            return
+
+        try:
+            await ctx.send(file=discord.File(file_path, filename=file_path.name))
+        except discord.HTTPException:
+            await ctx.send(f"The saved screenshot for match `{match_id}` could not be uploaded to Discord.")
+
+    @app_commands.command(name="match", description="Show the saved screenshot for a match ID.")
+    async def match_slash(self, interaction: discord.Interaction, match_id: int):
+        await interaction.response.defer()
+        ctx = self._slash_ctx(interaction)
+        await self.match_cmd.callback(self, ctx, match_id)
+
+    @commands.command(
+        name="add",
+        help="Exec: attach the original screenshot to a match ID. Usage: `!add <match_id>` with an image attached.",
+    )
+    @commands.check(is_exec)
+    async def add_match_screenshot_cmd(self, ctx, match_id: int):
+        if not match_exists(match_id):
+            await ctx.send(f"Match `{match_id}` is not recorded in the database.")
+            return
+
+        attachment = _first_image_attachment(ctx)
+        if not attachment:
+            await ctx.send("Attach a PNG or JPEG with the command, like `!add <match_id>`.")
+            return
+
+        existing = get_match_screenshot(match_id)
+        existing_path = resolve_screenshot_path(existing["file_path"]) if existing else None
+        if existing_path and existing_path.exists():
+            await ctx.send(f"Match `{match_id}` already has a saved screenshot. Use `!replace {match_id}` instead.")
+            return
+
+        saved_path, error = await _save_match_attachment(ctx, match_id, attachment)
+        if not saved_path:
+            await ctx.send(error or f"Could not save the screenshot for match `{match_id}`.")
+            return
+        await ctx.send(f"Saved screenshot for match `{match_id}`.")
+
+    @commands.command(
+        name="replace",
+        help="Exec: replace the saved screenshot for a match ID. Usage: `!replace <match_id>` with an image attached.",
+    )
+    @commands.check(is_exec)
+    async def replace_match_screenshot_cmd(self, ctx, match_id: int):
+        if not match_exists(match_id):
+            await ctx.send(f"Match `{match_id}` is not recorded in the database.")
+            return
+
+        attachment = _first_image_attachment(ctx)
+        if not attachment:
+            await ctx.send("Attach a replacement PNG or JPEG with the command, like `!replace <match_id>`.")
+            return
+
+        saved_path, error = await _save_match_attachment(ctx, match_id, attachment)
+        if not saved_path:
+            await ctx.send(error or f"Could not replace the screenshot for match `{match_id}`.")
+            return
+        await ctx.send(f"Replaced screenshot for match `{match_id}`.")
 
     @commands.command(
         name="cstats",

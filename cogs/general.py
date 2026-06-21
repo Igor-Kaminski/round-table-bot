@@ -41,6 +41,7 @@ class General(commands.Cog):
             ("stats", "Player stats by role/champion/filter."),
             ("top", "Your champion table with custom stat columns."),
             ("history", "Recent match history for a player."),
+            ("match", "Saved screenshot for a match ID."),
         ],
         "Leaderboards & Maps": [
             ("lb", "Player leaderboard for WR, KP, DPM, healing, and more."),
@@ -72,6 +73,8 @@ class General(commands.Cog):
             ("query", "Run a SELECT query."),
             ("ingest_text", "Insert a pasted scoreboard."),
             ("delete_match", "Delete a match by ID."),
+            ("add", "Attach a saved screenshot to a match."),
+            ("replace", "Replace a saved match screenshot."),
             ("fetch_embeds", "Backfill queue embeds."),
             ("link_disc", "Update a player's Discord ID."),
             ("show_alts", "Show a player's alts."),

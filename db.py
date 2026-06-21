@@ -5,6 +5,7 @@ import time as time_module
 import unicodedata
 
 from core.constants import CHAMPION_ROLES, get_champions_for_role, resolve_champion_name
+from utils.match_screenshots import remove_screenshot_file
 
 CHAMPION_NAME_FIXES = {
     "Ghrok": "Grohk",
@@ -289,6 +290,100 @@ def backfill_match_registered_at(match_timestamps):
         conn.close()
 
 
+def _get_match_screenshot_row(cursor, match_id):
+    try:
+        cursor.execute(
+            """
+            SELECT
+                match_id, file_path, source_url, message_id, attachment_id,
+                channel_id, created_at, saved_at
+            FROM match_screenshots
+            WHERE match_id = ?;
+            """,
+            (int(match_id),),
+        )
+    except sqlite3.OperationalError:
+        return None
+    return cursor.fetchone()
+
+
+def link_match_screenshot(
+    match_id,
+    file_path,
+    source_url=None,
+    message_id=None,
+    attachment_id=None,
+    channel_id=None,
+    created_at=None,
+    saved_at=None,
+):
+    """Store or replace the locally saved OCR image for a match."""
+    if not file_path:
+        return False
+
+    match_id = int(match_id)
+    created_at = int(created_at) if created_at is not None else None
+    saved_at = int(saved_at or time_module.time())
+    conn = sqlite3.connect("match_data.db")
+    cursor = conn.cursor()
+    try:
+        cursor.execute(
+            """
+            INSERT INTO match_screenshots (
+                match_id, file_path, source_url, message_id, attachment_id,
+                channel_id, created_at, saved_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(match_id) DO UPDATE SET
+                file_path = excluded.file_path,
+                source_url = excluded.source_url,
+                message_id = excluded.message_id,
+                attachment_id = excluded.attachment_id,
+                channel_id = excluded.channel_id,
+                created_at = excluded.created_at,
+                saved_at = excluded.saved_at;
+            """,
+            (
+                match_id,
+                str(file_path),
+                source_url,
+                str(message_id) if message_id is not None else None,
+                str(attachment_id) if attachment_id is not None else None,
+                str(channel_id) if channel_id is not None else None,
+                created_at,
+                saved_at,
+            ),
+        )
+        if created_at is not None:
+            cursor.execute(
+                """
+                UPDATE matches
+                SET registered_at = COALESCE(registered_at, ?)
+                WHERE match_id = ?;
+                """,
+                (created_at, match_id),
+            )
+        conn.commit()
+        return True
+    except sqlite3.Error as e:
+        print(f"Link match screenshot failed for {match_id}: {e}")
+        conn.rollback()
+        return False
+    finally:
+        conn.close()
+
+
+def get_match_screenshot(match_id):
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        row = _get_match_screenshot_row(cursor, match_id)
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def create_database(match_registered_at=None):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
@@ -305,6 +400,20 @@ def create_database(match_registered_at=None):
             registered_at INTEGER,
             player_count INTEGER,
             is_complete INTEGER DEFAULT 1
+        );
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS match_screenshots (
+            match_id INTEGER PRIMARY KEY,
+            file_path TEXT NOT NULL,
+            source_url TEXT,
+            message_id TEXT,
+            attachment_id TEXT,
+            channel_id TEXT,
+            created_at INTEGER,
+            saved_at INTEGER NOT NULL
         );
         """
     )
@@ -383,6 +492,12 @@ def create_database(match_registered_at=None):
         """
         CREATE INDEX IF NOT EXISTS idx_matches_registered_at
         ON matches(registered_at);
+        """
+    )
+    cursor.execute(
+        """
+        CREATE INDEX IF NOT EXISTS idx_match_screenshots_saved_at
+        ON match_screenshots(saved_at);
         """
     )
 
@@ -479,7 +594,9 @@ def insert_scoreboard(scoreboard, queue_num):
         team1_score = scoreboard["team1_score"]
         team2_score = scoreboard["team2_score"]
         players = scoreboard["players"]
-        registered_at = int(scoreboard.get("registered_at") or time_module.time())
+        screenshot_row = _get_match_screenshot_row(cursor, match_id)
+        screenshot_created_at = screenshot_row[6] if screenshot_row else None
+        registered_at = int(scoreboard.get("registered_at") or screenshot_created_at or time_module.time())
         player_count = len(players)
         is_complete = int(
             player_count == 10
@@ -2155,15 +2272,23 @@ def delete_match(match_id):
         if not cursor.fetchone():
             return 0
 
+        screenshot_row = _get_match_screenshot_row(cursor, match_id)
+        screenshot_path = screenshot_row[1] if screenshot_row else None
+
         cursor.execute("DELETE FROM player_stats WHERE match_id = ?", (match_id,))
         stats_deleted_count = cursor.rowcount
+
+        cursor.execute("DELETE FROM match_screenshots WHERE match_id = ?", (match_id,))
+        screenshots_deleted_count = cursor.rowcount
 
         cursor.execute("DELETE FROM matches WHERE match_id = ?", (match_id,))
         match_deleted_count = cursor.rowcount
 
         conn.commit()
+        if screenshot_path:
+            remove_screenshot_file(screenshot_path)
         
-        return stats_deleted_count + match_deleted_count
+        return stats_deleted_count + screenshots_deleted_count + match_deleted_count
     except sqlite3.Error as e:
         print(f"An error occurred while deleting match {match_id}: {e}")
         conn.rollback()
