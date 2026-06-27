@@ -639,6 +639,17 @@ async def _extract_match_filters(ctx, args):
     return remaining, filters, None
 
 
+from utils.match_filters import (
+    compact_arg as _compact_arg,
+    extract_match_filters as _extract_match_filters,
+    filter_summary as _filter_summary,
+    slash_filter_args as _slash_filter_args,
+    split_words as _split_words,
+    stat_flag as _stat_flag,
+    title_filter_suffix as _title_filter_suffix,
+)
+
+
 def _resolve_leading_map(args):
     args = list(args)
     for end in range(len(args), 0, -1):
@@ -715,7 +726,13 @@ class Stats(commands.Cog):
             "enemies": "Enemy Matchup Examples",
             "matchups": "Enemy Matchup Examples",
             "withchamps": "Related Champion Examples",
+            "withchars": "Related Champion Examples",
+            "champswith": "Related Champion Examples",
+            "charswith": "Related Champion Examples",
             "againstchamps": "Related Champion Examples",
+            "againstchars": "Related Champion Examples",
+            "champsagainst": "Related Champion Examples",
+            "charsagainst": "Related Champion Examples",
             "filters": "Filter Examples",
             "filter": "Filter Examples",
             "aliases": "Alias Examples",
@@ -751,6 +768,7 @@ class Stats(commands.Cog):
                 "`!stats pjamo damba wins` - Mal'Damba stats in wins only.",
                 "`!stats me ying map jaguar falls` - Ying stats on Jaguar Falls.",
                 "`!stats me fernando team2` - Fernando stats on Team 2.",
+                "`!stats me fernando talent scorch` - Fernando stats while using Scorch.",
                 "`!stats me moji 4-3` - Moji stats in games ending 4-3.",
                 "`!stats me support last 7d` - Your support stats from matches recorded in the last 7 days.",
                 "`!stats me support season 4` - Your support stats from Season 4.",
@@ -764,6 +782,7 @@ class Stats(commands.Cog):
                 "`!top me bk` - Your Bomb King table.",
                 "`!top @user -dmg -heal_pm ying` - A user's Ying damage and healing/min.",
                 "`!top me barik map jaguar falls` - Barik on Jaguar Falls.",
+                "`!top me fernando talent scorch` - Fernando table filtered to Scorch games.",
                 "`!top me nyx team1` - Nyx on Team 1.",
                 "`!top me ash losses` - Ash in losses only.",
                 "`!top me support 14d` - Support champion table from matches recorded in the last 14 days.",
@@ -776,6 +795,7 @@ class Stats(commands.Cog):
                 "`!lb kp moji` - Moji KP leaderboard.",
                 "`!lb dhpm ying` - Ying damage+healing/min leaderboard.",
                 "`!lb wr barik team2` - Barik WR on Team 2.",
+                "`!lb wr fernando talent scorch` - Fernando Scorch WR leaderboard.",
                 "`!lb wr inara 4-3` - Inara WR in 4-3 games.",
                 "`!lb wr ash against nozy` - Ash WR against nozy.",
                 "`!lb dmg bk wins` - Bomb King damage/min in wins.",
@@ -841,6 +861,7 @@ class Stats(commands.Cog):
             "cstats": [
                 "`!cstats koga` - Overall Koga stats across the server.",
                 "`!cstats nando s4` - Fernando stats from Season 4.",
+                "`!cstats nando talent scorch` - Fernando stats while using Scorch.",
                 "`!cstats nando vs koga` - Fernando stats only when the enemy team had Koga.",
                 "`!cstats nando notvs lex` - Fernando stats when the enemy team did not have Lex.",
                 "`!cstats nando vs koga notvs lex` - Stack multiple champion matchup filters.",
@@ -884,6 +905,8 @@ class Stats(commands.Cog):
             "withchamps": [
                 "`!withchamps me` - Champion records when those champs are on your team.",
                 "`!againstchamps me` - Champion records when those champs are against you.",
+                "`!champswith me best 15` - Top allied champions with you.",
+                "`!champsagainst me worst -m 5` - Enemy champions you struggle against, min 5 appearances.",
                 "`!withchamps me worst -m 5` - Allied champions with bad records, min 5 appearances.",
                 "`!againstchamps me worst -m 5` - Enemy champions you struggle against, min 5 appearances.",
                 "`!withchamps me support season 4` - Allied support champion records in Season 4.",
@@ -945,8 +968,16 @@ class Stats(commands.Cog):
             "matchups": "enemies",
             "allychamps": "withchamps",
             "alliedchamps": "withchamps",
+            "withchars": "withchamps",
+            "allychars": "withchamps",
+            "alliedchars": "withchamps",
+            "champswith": "withchamps",
+            "charswith": "withchamps",
             "enemychamps": "againstchamps",
-            "againstchamps": "withchamps",
+            "againstchars": "againstchamps",
+            "enemychars": "againstchamps",
+            "champsagainst": "againstchamps",
+            "charsagainst": "againstchamps",
             "filter": "filters",
             "alias": "aliases",
         }
@@ -979,6 +1010,7 @@ class Stats(commands.Cog):
                 name="Match",
                 value=(
                     "`map <name>` - map only, e.g. `map jaguar falls`.\n"
+                    "`talent <name>` / `-talent <name>` - talent only, e.g. `talent scorch`.\n"
                     "`wins` / `losses` - result only.\n"
                     "`team1` / `team2` - draft side.\n"
                     "`4-3`, `close`, `stomp`, `sweep` - score filters."
@@ -1695,7 +1727,7 @@ class Stats(commands.Cog):
 
     @commands.command(
         name="withchamps",
-        aliases=["allychamps", "alliedchamps"],
+        aliases=["allychamps", "alliedchamps", "withchars", "allychars", "alliedchars", "champswith", "charswith"],
         help="Show champion records when those champions are on your team. Usage: `!withchamps [user|ign] [best|worst|both] [-m games] [champion|role] [filters]`.",
     )
     async def withchamps_cmd(self, ctx, *args):
@@ -1703,7 +1735,7 @@ class Stats(commands.Cog):
 
     @commands.command(
         name="againstchamps",
-        aliases=["enemychamps"],
+        aliases=["enemychamps", "againstchars", "enemychars", "champsagainst", "charsagainst"],
         help="Show champion records when those champions are against you. Usage: `!againstchamps [user|ign] [best|worst|both] [-m games] [champion|role] [filters]`.",
     )
     async def againstchamps_cmd(self, ctx, *args):
@@ -2214,8 +2246,10 @@ Shows champion statistics breakdown for a player.
         if champion_filter and champ_data:
             # Find champions that match the filter
             filtered_data = []
+            champion_filter_key = champion_filter.lower()
             for champ in champ_data:
-                if champion_filter in champ['champ'].lower():
+                champ_key = champ["champ"].lower()
+                if champion_filter_key == champ_key or champion_filter_key in champ_key:
                     filtered_data.append(champ)
             
             if not filtered_data:
@@ -3445,20 +3479,54 @@ This is the same as using `!lb ... map <map name>`.
         name="compare",
         help=(
             "Head-to-head comparison between two players.\n"
-            "Usage: `!compare <user1|ign> [user2|ign]`\n"
+            "Usage: `!compare <user1|ign> [user2|ign] [filters]`\n"
             "If the second player is omitted, compares against you. Each argument "
             "accepts mentions, IDs, usernames, main IGNs, or alt IGNs.\n"
+            "Filters: time, map, result, team, score, with/against player.\n"
             "Examples:\n"
             "- `!compare pjamo`\n"
             "- `!compare @user`\n"
             "- `!compare pjamo nozy`\n"
-            "- `!compare @user pjamo`\n"
-            "- `!compare lulub DTC`"
+            "- `!compare @user pjamo s4`\n"
+            "- `!compare lulub DTC map jaguar falls`"
         ),
     )
-    async def compare_cmd(self, ctx, user1: PlayerConverter, user2: PlayerConverter = None):
-        # If user2 is not provided, default to the command author
-        user2 = user2 or ctx.author
+    async def compare_cmd(self, ctx, *args):
+        args, match_filters, filter_error = await _extract_match_filters(ctx, args)
+        if filter_error:
+            await ctx.send(filter_error)
+            return
+
+        if not args:
+            await ctx.send("Usage: `!compare <user1|ign> [user2|ign] [filters]`, like `!compare pjamo nozy s4`.")
+            return
+
+        user1 = None
+        user2 = ctx.author
+        parse_error = None
+
+        if len(args) == 1:
+            try:
+                user1 = await PlayerConverter().convert(ctx, str(args[0]))
+            except commands.BadArgument as exc:
+                parse_error = str(exc)
+        else:
+            for split_at in range(1, len(args)):
+                first_arg = " ".join(str(part) for part in args[:split_at])
+                second_arg = " ".join(str(part) for part in args[split_at:])
+                try:
+                    candidate_user1 = await PlayerConverter().convert(ctx, first_arg)
+                    candidate_user2 = await PlayerConverter().convert(ctx, second_arg)
+                except commands.BadArgument as exc:
+                    parse_error = str(exc)
+                    continue
+                user1 = candidate_user1
+                user2 = candidate_user2
+                break
+
+        if not user1:
+            await ctx.send(parse_error or "Could not find the first player to compare.")
+            return
 
         if user1 == user2:
             await ctx.send("You can't compare a player to themselves!")
@@ -3470,7 +3538,7 @@ This is the same as using `!lb ... map <map name>`.
             await ctx.send("Could not find stats for one or both players. Ensure they have linked their IGNs.")
             return
 
-        result = compare_by_player_ids(pid1, pid2)
+        result = compare_by_player_ids(pid1, pid2, filters=match_filters)
         if not result:
             await ctx.send("Could not find stats for one or both players. Ensure they have linked their IGNs.")
             return
@@ -3480,7 +3548,7 @@ This is the same as using `!lb ... map <map name>`.
 
         # --- Create the Embed ---
         embed = discord.Embed(
-            title=f"Head-to-Head: {user1.name} vs {user2.name}",
+            title=f"Head-to-Head: {user1.name} vs {user2.name}{_title_filter_suffix(match_filters)}",
             description="Here's how their stats stack up.",
             color=0x3498DB
         )
@@ -3491,7 +3559,7 @@ This is the same as using `!lb ... map <map name>`.
         else:
             embed.set_author(name=user1.display_name)
         embed.set_footer(
-            text=f"Compared with {user2.display_name}",
+            text="    •   ".join(["Compared with " + user2.display_name] + _filter_summary(match_filters)),
             icon_url=user2_icon if user2_icon else None,
         )
 
@@ -3570,16 +3638,48 @@ This is the same as using `!lb ... map <map name>`.
     @app_commands.describe(
         user_1="First user.",
         user_2="Second user. Leave empty to compare against yourself.",
+        time_range="Matches recorded in the last N days.",
+        since="Custom start date: YYYY-MM-DD.",
+        until="Custom end date: YYYY-MM-DD.",
+        map_name="Map name.",
+        result="Wins or losses only.",
+        team="Draft side/team filter.",
+        score="Score filter.",
+        with_player="Only matches on the same team as this member.",
+        against_player="Only matches against this member.",
     )
     async def compare_slash(
         self,
         interaction: discord.Interaction,
         user_1: discord.Member,
         user_2: discord.Member = None,
+        time_range: TimeRange = None,
+        since: str = None,
+        until: str = None,
+        map_name: str = None,
+        result: ResultFilter = None,
+        team: TeamFilter = None,
+        score: ScoreFilter = None,
+        with_player: discord.Member = None,
+        against_player: discord.Member = None,
     ):
         await interaction.response.defer()
         ctx = self._slash_ctx(interaction)
-        await self.compare_cmd.callback(self, ctx, user_1, user_2)
+        args = [str(user_1.id)]
+        if user_2:
+            args.append(str(user_2.id))
+        args.extend(_slash_filter_args(
+            time_range=time_range,
+            since=since,
+            until=until,
+            map_name=map_name,
+            result=result,
+            team=team,
+            score=score,
+            with_player=with_player,
+            against_player=against_player,
+        ))
+        await self.compare_cmd.callback(self, ctx, *args)
 
     CHAMPION_LEADERBOARD_HELP = """
 Shows champion rankings aggregated across all players.

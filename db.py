@@ -128,6 +128,10 @@ def _apply_match_filters(where_conditions, params, filters=None, player_alias="p
         where_conditions.append(f"m.map IN ({placeholders})")
         params.extend(map_names)
 
+    if filters.get("talent"):
+        where_conditions.append(f"LOWER(TRIM({player_alias}.talent)) LIKE ?")
+        params.append(f"%{str(filters['talent']).lower().strip()}%")
+
     if filters.get("result") == "wins":
         where_conditions.append(_win_condition(player_alias))
     elif filters.get("result") == "losses":
@@ -1365,11 +1369,15 @@ def get_player_stats(player_id, champions=None, filters=None):
         conn.close()
 
 
-def get_top_champs(player_id):
+def get_top_champs(player_id, filters=None):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
+    where_conditions = ["ps.player_id = ?"]
+    params = [player_id]
+    _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+    where_clause = " AND ".join(where_conditions)
     cursor.execute(
-        """
+        f"""
         SELECT
             champ,
             COUNT(*),
@@ -1378,12 +1386,12 @@ def get_top_champs(player_id):
             SUM(damage), SUM(objective_time), SUM(shielding), SUM(healing), SUM(m.time)
         FROM player_stats ps
         JOIN matches m ON ps.match_id = m.match_id
-            WHERE player_id = ?
+        WHERE {where_clause}
         GROUP BY champ
         ORDER BY COUNT(*) DESC
         LIMIT 5
         """,
-        (player_id,),
+        params,
     )
     rows = cursor.fetchall()
     champs = []
@@ -1409,37 +1417,41 @@ def get_top_champs(player_id):
     conn.close()
     return champs
 
-def get_winrate_with_against(pid1, pid2):
+def get_winrate_with_against(pid1, pid2, filters=None):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
+    where_conditions = ["ps1.player_id = ?", "ps2.player_id = ?", "ps1.team = ps2.team"]
+    params = [pid1, pid2]
+    _apply_match_filters(where_conditions, params, filters, player_alias="ps1")
+    where_clause = " AND ".join(where_conditions)
     cursor.execute(
-        """
+        f"""
         SELECT m.team1_score, m.team2_score, ps1.team
         FROM matches m
         JOIN player_stats ps1 ON m.match_id = ps1.match_id
         JOIN player_stats ps2 ON m.match_id = ps2.match_id
-        WHERE ps1.player_id = ?
-          AND ps2.player_id = ?
-          AND ps1.team = ps2.team
+        WHERE {where_clause}
         """,
-        (pid1, pid2),
+        params,
     )
     rows = cursor.fetchall()
     with_games = len(rows)
     with_wins = sum(1 for t1, t2, team in rows if (team == 1 and t1 > t2) or (team == 2 and t2 > t1))
     with_winrate = round(100 * with_wins / with_games, 1) if with_games else 0
 
+    where_conditions = ["ps1.player_id = ?", "ps2.player_id = ?", "ps1.team != ps2.team"]
+    params = [pid1, pid2]
+    _apply_match_filters(where_conditions, params, filters, player_alias="ps1")
+    where_clause = " AND ".join(where_conditions)
     cursor.execute(
-        """
+        f"""
         SELECT m.team1_score, m.team2_score, ps1.team
         FROM matches m
         JOIN player_stats ps1 ON m.match_id = ps1.match_id
         JOIN player_stats ps2 ON m.match_id = ps2.match_id
-        WHERE ps1.player_id = ?
-          AND ps2.player_id = ?
-          AND ps1.team != ps2.team
+        WHERE {where_clause}
         """,
-        (pid1, pid2),
+        params,
     )
     rows = cursor.fetchall()
     against_games = len(rows)
@@ -1448,17 +1460,17 @@ def get_winrate_with_against(pid1, pid2):
     conn.close()
     return with_winrate, with_games, against_winrate, against_games
 
-def compare_by_player_ids(pid1, pid2):
+def compare_by_player_ids(pid1, pid2, filters=None):
     if not pid1 or not pid2:
         return None
 
-    stats1 = get_player_stats(pid1)
-    stats2 = get_player_stats(pid2)
+    stats1 = get_player_stats(pid1, filters=filters)
+    stats2 = get_player_stats(pid2, filters=filters)
     if not stats1 or not stats2:
         return None
-    champs1 = get_top_champs(pid1)
-    champs2 = get_top_champs(pid2)
-    with_winrate, with_games, against_winrate, against_games = get_winrate_with_against(pid1, pid2)
+    champs1 = get_top_champs(pid1, filters=filters)
+    champs2 = get_top_champs(pid2, filters=filters)
+    with_winrate, with_games, against_winrate, against_games = get_winrate_with_against(pid1, pid2, filters=filters)
 
     return {
         "player1": stats1, "player2": stats2, "top_champs1": champs1, "top_champs2": champs2,
@@ -1467,10 +1479,10 @@ def compare_by_player_ids(pid1, pid2):
     }
 
 
-def compare_players(discord_id1, discord_id2):
+def compare_players(discord_id1, discord_id2, filters=None):
     pid1 = get_player_id(discord_id1)
     pid2 = get_player_id(discord_id2)
-    return compare_by_player_ids(pid1, pid2)
+    return compare_by_player_ids(pid1, pid2, filters=filters)
 
 def get_teammate_records(player_id, limit=10, show_bottom=False, min_games=1, champion=None, role=None, filters=None):
     return get_player_relationship_records(
@@ -1495,8 +1507,8 @@ def get_player_relationship_records(player_id, relation="with", limit=10, show_b
 
         if champion:
             champion = resolve_champion_name(champion) or champion
-            where_conditions.append("ps.champ LIKE ?")
-            params.append(f"%{champion}%")
+            where_conditions.append("ps.champ = ?")
+            params.append(champion)
         elif role:
             champions_in_role = get_champions_for_role(role)
             if not champions_in_role:
@@ -1896,8 +1908,8 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
 
     if champion:
         champion = resolve_champion_name(champion) or champion
-        where_conditions.append("ps.champ LIKE ?")
-        params.append(f"%{champion}%")
+        where_conditions.append("ps.champ = ?")
+        params.append(champion)
     elif role:
         champions_in_role = get_champions_for_role(role)
         if not champions_in_role: return None
@@ -2076,18 +2088,11 @@ def get_discord_id_for_ign(ign):
 
 def get_champion_name(player_id, partial_name):
     resolved_name = resolve_champion_name(partial_name)
+    if resolved_name:
+        return resolved_name
+
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
-    if resolved_name:
-        cursor.execute(
-            "SELECT DISTINCT champ FROM player_stats WHERE player_id = ? AND champ = ? LIMIT 1;",
-            (player_id, resolved_name)
-        )
-        result = cursor.fetchone()
-        if result:
-            conn.close()
-            return result[0]
-
     cursor.execute(
         "SELECT DISTINCT champ FROM player_stats WHERE player_id = ? AND champ LIKE ? LIMIT 1;",
         (player_id, f"%{partial_name}%")

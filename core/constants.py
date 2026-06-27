@@ -27,6 +27,7 @@ POINT_TANKS = {"Barik", "Fernando", "Inara", "Nyx", "Terminus"}
 CHAMPION_ALIASES = {
     "andy": "Androxus",
     "bk": "Bomb King",
+    "bomb": "Bomb King",
     "bombking": "Bomb King",
     "damba": "Mal'Damba",
     "lilith": "Lillith",
@@ -34,6 +35,7 @@ CHAMPION_ALIASES = {
     "maldamba": "Mal'Damba",
     "nando": "Fernando",
     "ruk": "Ruckus",
+    "seven": "VII",
 }
 
 ROLE_ALIASES = {
@@ -53,6 +55,20 @@ def _normalize_lookup(value):
 
 def _compact_lookup(value):
     return _normalize_lookup(value).replace(" ", "")
+
+
+def _champion_lookup_keys(champion):
+    normalized = _normalize_lookup(champion)
+    compact = normalized.replace(" ", "")
+    return normalized, compact
+
+
+def _unique_champion_matches(predicate):
+    matches = []
+    for champion in CHAMPION_ROLES:
+        if predicate(champion) and champion not in matches:
+            matches.append(champion)
+    return matches
 
 
 def resolve_role_name(name):
@@ -85,6 +101,8 @@ def get_champions_for_role(role):
 def resolve_champion_name(name):
     normalized = _normalize_lookup(name)
     compact = normalized.replace(" ", "")
+    if not normalized:
+        return None
 
     if normalized in CHAMPION_ALIASES:
         return CHAMPION_ALIASES[normalized]
@@ -92,9 +110,31 @@ def resolve_champion_name(name):
         return CHAMPION_ALIASES[compact]
 
     for champion in CHAMPION_ROLES:
-        champion_key = champion.lower().replace("'", "")
-        if normalized == champion_key or compact == champion_key.replace(" ", ""):
+        champion_key, champion_compact = _champion_lookup_keys(champion)
+        if normalized == champion_key or compact == champion_compact:
             return champion
+
+    prefix_matches = _unique_champion_matches(
+        lambda champion: any(
+            key.startswith(needle)
+            for key in _champion_lookup_keys(champion)
+            for needle in (normalized, compact)
+            if needle
+        )
+    )
+    if len(prefix_matches) == 1:
+        return prefix_matches[0]
+
+    contains_matches = _unique_champion_matches(
+        lambda champion: any(
+            needle in key
+            for key in _champion_lookup_keys(champion)
+            for needle in (normalized, compact)
+            if needle
+        )
+    )
+    if len(contains_matches) == 1:
+        return contains_matches[0]
 
     return None
 
