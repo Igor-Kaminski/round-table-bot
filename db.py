@@ -1627,6 +1627,316 @@ def get_related_champion_records(player_id, relation="with", limit=10, show_bott
     finally:
         conn.close()
 
+
+def _record_dict(row, name_key):
+    games = row["games"] or 0
+    wins = row["wins"] or 0
+    return {
+        name_key: row[name_key],
+        "games": games,
+        "wins": wins,
+        "losses": games - wins,
+        "winrate": round(wins * 100.0 / games, 2) if games else 0,
+    }
+
+
+def get_talent_records(champion, limit=10, show_bottom=False, min_games=1, filters=None):
+    champion = resolve_champion_name(champion) or champion
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        where_conditions = ["ps.champ = ?", "TRIM(COALESCE(ps.talent, '')) != ''"]
+        params = [champion]
+        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+        where_clause = " AND ".join(where_conditions)
+        order = "ASC" if show_bottom else "DESC"
+
+        cursor.execute(f"""
+            SELECT
+                TRIM(ps.talent) AS talent,
+                COUNT(ps.match_id) AS games,
+                SUM(CASE
+                    WHEN (ps.team = 1 AND m.team1_score > m.team2_score)
+                      OR (ps.team = 2 AND m.team2_score > m.team1_score)
+                    THEN 1 ELSE 0
+                END) AS wins
+            FROM player_stats ps
+            JOIN matches m ON ps.match_id = m.match_id
+            WHERE {where_clause}
+            GROUP BY TRIM(ps.talent)
+            HAVING games >= ?
+            ORDER BY (wins * 100.0 / games) {order}, games DESC, talent COLLATE NOCASE ASC
+            LIMIT ?;
+        """, params + [min_games, limit])
+
+        return [_record_dict(row, "talent") for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_pickrate_records(limit=20, show_bottom=False, min_games=1, role=None, filters=None):
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        where_conditions = ["m.time > 0"]
+        params = []
+        if role:
+            champions_in_role = get_champions_for_role(role)
+            if not champions_in_role:
+                return []
+            placeholders = ", ".join("?" for _ in champions_in_role)
+            where_conditions.append(f"ps.champ IN ({placeholders})")
+            params.extend(champions_in_role)
+
+        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+        where_clause = " AND ".join(where_conditions)
+        order = "ASC" if show_bottom else "DESC"
+
+        cursor.execute(f"""
+            WITH FilteredRows AS (
+                SELECT ps.champ, ps.team, m.team1_score, m.team2_score
+                FROM player_stats ps
+                JOIN matches m ON ps.match_id = m.match_id
+                WHERE {where_clause}
+            ),
+            Totals AS (
+                SELECT COUNT(*) AS total_picks FROM FilteredRows
+            )
+            SELECT
+                fr.champ,
+                COUNT(*) AS games,
+                SUM(CASE
+                    WHEN (fr.team = 1 AND fr.team1_score > fr.team2_score)
+                      OR (fr.team = 2 AND fr.team2_score > fr.team1_score)
+                    THEN 1 ELSE 0
+                END) AS wins,
+                (COUNT(*) * 100.0 / NULLIF((SELECT total_picks FROM Totals), 0)) AS pickrate
+            FROM FilteredRows fr
+            GROUP BY fr.champ
+            HAVING games >= ?
+            ORDER BY pickrate {order}, games DESC, fr.champ COLLATE NOCASE ASC
+            LIMIT ?;
+        """, params + [min_games, limit])
+
+        rows = []
+        for row in cursor.fetchall():
+            item = _record_dict(row, "champ")
+            item["pickrate"] = round(row["pickrate"] or 0, 2)
+            rows.append(item)
+        return rows
+    finally:
+        conn.close()
+
+
+def get_current_streak_records(limit=10, streak_type="both", filters=None):
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        where_conditions = ["p.discord_id IS NOT NULL"]
+        params = []
+        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+        where_clause = " AND ".join(where_conditions)
+
+        cursor.execute(f"""
+            SELECT
+                p.player_id,
+                p.player_ign,
+                p.discord_id,
+                ps.match_id,
+                CASE
+                    WHEN (ps.team = 1 AND m.team1_score > m.team2_score)
+                      OR (ps.team = 2 AND m.team2_score > m.team1_score)
+                    THEN 'W' ELSE 'L'
+                END AS result
+            FROM player_stats ps
+            JOIN matches m ON ps.match_id = m.match_id
+            JOIN players p ON ps.player_id = p.player_id
+            WHERE {where_clause}
+            ORDER BY p.player_id ASC, COALESCE(m.registered_at, 0) DESC, ps.player_stats_id DESC;
+        """, params)
+
+        streaks = []
+        current_player = None
+        current_result = None
+        current_count = 0
+        locked = False
+        row_info = None
+
+        desired_result = None
+        if streak_type in {"win", "wins", "w"}:
+            desired_result = "W"
+        elif streak_type in {"loss", "losses", "l"}:
+            desired_result = "L"
+
+        def flush():
+            if row_info and current_count:
+                if desired_result is None or current_result == desired_result:
+                    streaks.append({
+                        "player_id": row_info["player_id"],
+                        "player_ign": row_info["player_ign"],
+                        "discord_id": row_info["discord_id"],
+                        "result": current_result,
+                        "streak": current_count,
+                    })
+
+        for row in cursor.fetchall():
+            if row["player_id"] != current_player:
+                flush()
+                current_player = row["player_id"]
+                current_result = row["result"]
+                current_count = 1
+                locked = False
+                row_info = row
+                continue
+            if locked:
+                continue
+            if row["result"] == current_result:
+                current_count += 1
+            else:
+                locked = True
+        flush()
+
+        streaks.sort(key=lambda item: (-item["streak"], item["player_ign"].lower()))
+        return streaks[:limit]
+    finally:
+        conn.close()
+
+
+def _relationship_record(player_id, other_player_id, relation, filters=None):
+    conn = sqlite3.connect("match_data.db")
+    cursor = conn.cursor()
+    try:
+        team_operator = "=" if relation == "with" else "!="
+        where_conditions = ["ps.player_id = ?", "other.player_id = ?", f"ps.team {team_operator} other.team"]
+        params = [player_id, other_player_id]
+        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+        where_clause = " AND ".join(where_conditions)
+        cursor.execute(f"""
+            SELECT
+                COUNT(ps.match_id) AS games,
+                SUM(CASE
+                    WHEN (ps.team = 1 AND m.team1_score > m.team2_score)
+                      OR (ps.team = 2 AND m.team2_score > m.team1_score)
+                    THEN 1 ELSE 0
+                END) AS wins
+            FROM player_stats ps
+            JOIN matches m ON ps.match_id = m.match_id
+            JOIN player_stats other ON ps.match_id = other.match_id
+            WHERE {where_clause};
+        """, params)
+        row = cursor.fetchone()
+        games = row[0] or 0
+        wins = row[1] or 0
+        return {
+            "games": games,
+            "wins": wins,
+            "losses": games - wins,
+            "winrate": round(wins * 100.0 / games, 2) if games else 0,
+        }
+    finally:
+        conn.close()
+
+
+def get_player_pair_champion_records(player_id, other_player_id, relation="with", limit=5, show_bottom=False, min_games=1, filters=None):
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        team_operator = "=" if relation == "with" else "!="
+        where_conditions = ["ps.player_id = ?", "other.player_id = ?", f"ps.team {team_operator} other.team"]
+        params = [player_id, other_player_id]
+        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+        where_clause = " AND ".join(where_conditions)
+        order = "ASC" if show_bottom else "DESC"
+
+        cursor.execute(f"""
+            SELECT
+                ps.champ,
+                COUNT(ps.match_id) AS games,
+                SUM(CASE
+                    WHEN (ps.team = 1 AND m.team1_score > m.team2_score)
+                      OR (ps.team = 2 AND m.team2_score > m.team1_score)
+                    THEN 1 ELSE 0
+                END) AS wins
+            FROM player_stats ps
+            JOIN matches m ON ps.match_id = m.match_id
+            JOIN player_stats other ON ps.match_id = other.match_id
+            WHERE {where_clause}
+            GROUP BY ps.champ
+            HAVING games >= ?
+            ORDER BY (wins * 100.0 / games) {order}, games DESC, ps.champ COLLATE NOCASE ASC
+            LIMIT ?;
+        """, params + [min_games, limit])
+
+        return [_record_dict(row, "champ") for row in cursor.fetchall()]
+    finally:
+        conn.close()
+
+
+def get_player_pair_map_records(player_id, other_player_id, relation="with", limit=5, show_bottom=False, min_games=1, filters=None):
+    conn = sqlite3.connect("match_data.db")
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    try:
+        team_operator = "=" if relation == "with" else "!="
+        where_conditions = ["ps.player_id = ?", "other.player_id = ?", f"ps.team {team_operator} other.team"]
+        params = [player_id, other_player_id]
+        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
+        where_clause = " AND ".join(where_conditions)
+        cursor.execute(f"""
+            SELECT
+                m.map,
+                COUNT(ps.match_id) AS games,
+                SUM(CASE
+                    WHEN (ps.team = 1 AND m.team1_score > m.team2_score)
+                      OR (ps.team = 2 AND m.team2_score > m.team1_score)
+                    THEN 1 ELSE 0
+                END) AS wins
+            FROM player_stats ps
+            JOIN matches m ON ps.match_id = m.match_id
+            JOIN player_stats other ON ps.match_id = other.match_id
+            WHERE {where_clause}
+            GROUP BY m.map
+        """, params)
+
+        merged = {}
+        for row in cursor.fetchall():
+            map_name = display_map_name(row["map"])
+            item = merged.setdefault(map_name, {"map": map_name, "games": 0, "wins": 0})
+            item["games"] += row["games"] or 0
+            item["wins"] += row["wins"] or 0
+
+        rows = []
+        for item in merged.values():
+            games = item["games"]
+            wins = item["wins"]
+            if games < min_games:
+                continue
+            rows.append({
+                "map": item["map"],
+                "games": games,
+                "wins": wins,
+                "losses": games - wins,
+                "winrate": round(wins * 100.0 / games, 2) if games else 0,
+            })
+        rows.sort(key=lambda row: (row["winrate"] if show_bottom else -row["winrate"], -row["games"], row["map"].lower()))
+        return rows[:limit]
+    finally:
+        conn.close()
+
+
+def get_player_pair_summary(player_id, other_player_id, relation="with", limit=5, min_games=1, filters=None):
+    return {
+        "record": _relationship_record(player_id, other_player_id, relation, filters=filters),
+        "best_champs": get_player_pair_champion_records(player_id, other_player_id, relation, limit, False, min_games, filters),
+        "worst_champs": get_player_pair_champion_records(player_id, other_player_id, relation, limit, True, min_games, filters),
+        "best_maps": get_player_pair_map_records(player_id, other_player_id, relation, limit, False, min_games, filters),
+        "worst_maps": get_player_pair_map_records(player_id, other_player_id, relation, limit, True, min_games, filters),
+    }
+
 def get_match_history(player_id, limit: int = 30, filters=None):
     conn = sqlite3.connect("match_data.db")
     cursor = conn.cursor()
