@@ -33,6 +33,7 @@ from db import (
     get_champion_overall_stats,
     get_leaderboard,
     get_champion_leaderboard,
+    get_champion_relationship_records,
     compare_by_player_ids,
     get_current_streak_records,
     get_enemy_records,
@@ -749,6 +750,10 @@ class Stats(commands.Cog):
             "againstchars": "Related Champion Examples",
             "champsagainst": "Related Champion Examples",
             "charsagainst": "Related Champion Examples",
+            "champwith": "Champion Matchup Examples",
+            "champwithchamps": "Champion Matchup Examples",
+            "champagainst": "Champion Matchup Examples",
+            "champagainstchamps": "Champion Matchup Examples",
             "filters": "Filter Examples",
             "filter": "Filter Examples",
             "aliases": "Alias Examples",
@@ -771,6 +776,7 @@ class Stats(commands.Cog):
                 "`!examples mates` - Best and worst teammate examples.",
                 "`!examples enemies` - Enemy player matchup examples.",
                 "`!examples withchamps` - Allied/enemy champion examples.",
+                "`!examples champwith` - Champion ally/enemy matchup examples.",
                 "`!examples lb` - Player leaderboard examples.",
                 "`!examples clb` - Champion leaderboard examples.",
                 "`!examples map` - Map shortcut examples.",
@@ -965,6 +971,13 @@ class Stats(commands.Cog):
                 "`!againstchamps me worst -m 5` - Enemy champions you struggle against, min 5 appearances.",
                 "`!withchamps me support season 4` - Allied support champion records in Season 4.",
                 "`!againstchamps me nando map jaguar falls` - Your record against Fernando on Jaguar Falls.",
+            ],
+            "champwith": [
+                "`!champwith fernando` - Best and worst allied champions for Fernando.",
+                "`!champagainst fernando` - Best and worst enemy champion matchups for Fernando.",
+                "`!champwith khan support s4` - Allied support records when Khan is played in Season 4.",
+                "`!champagainst atlas flank -m 5` - Atlas records against flank champions with 5+ games.",
+                "`!champagainst nando koga map jaguar falls` - Fernando record against Koga on Jaguar Falls.",
             ],
             "filters": [
                 "`team1` / `team2` - Filter by draft side, e.g. `!lb wr barik team2`.",
@@ -2046,6 +2059,98 @@ class Stats(commands.Cog):
     )
     async def againstchamps_cmd(self, ctx, *args):
         await self._related_champs_cmd(ctx, "against", *args)
+
+    async def _champion_relationship_cmd(self, ctx, relation, *args):
+        start_time = time.monotonic()
+        args, match_filters, filter_error = await _extract_match_filters(ctx, args)
+        if filter_error:
+            await ctx.send(filter_error)
+            return
+
+        args, mode, min_games, limit = self._parse_list_options(list(args), default_limit=10)
+        if not args:
+            command = "champwith" if relation == "with" else "champagainst"
+            await ctx.send(f"Usage: `!{command} <champion> [best|worst|both] [-m games] [related champion/role] [filters]`.")
+            return
+
+        champion_name = None
+        remaining_args = []
+        for end in range(len(args), 0, -1):
+            candidate = " ".join(str(part) for part in args[:end])
+            champion_name = resolve_champion_name(candidate)
+            if champion_name:
+                remaining_args = args[end:]
+                break
+
+        if not champion_name:
+            await ctx.send(f"No champion found matching `{' '.join(str(arg) for arg in args)}`.")
+            return
+
+        related_champion = None
+        related_role = None
+        if remaining_args:
+            filter_str = " ".join(str(arg) for arg in remaining_args)
+            related_role = resolve_role_name(filter_str)
+            if not related_role:
+                related_champion = resolve_champion_name(filter_str)
+                if not related_champion:
+                    await ctx.send(f"No related champion or role found matching `{filter_str}`.")
+                    return
+
+        best_rows = get_champion_relationship_records(
+            champion_name, relation=relation, limit=limit, show_bottom=False,
+            min_games=min_games, related_champion=related_champion,
+            related_role=related_role, filters=match_filters,
+        ) if mode in {"best", "both"} else []
+        worst_rows = get_champion_relationship_records(
+            champion_name, relation=relation, limit=limit, show_bottom=True,
+            min_games=min_games, related_champion=related_champion,
+            related_role=related_role, filters=match_filters,
+        ) if mode in {"worst", "both"} else []
+
+        if not best_rows and not worst_rows:
+            label = "allied" if relation == "with" else "enemy"
+            await ctx.send(f"No {label} champion matchup records found for {champion_name}{_title_filter_suffix(match_filters)}.")
+            return
+
+        title_prefix = "Best Allied Champions For" if relation == "with" else "Best Enemy Matchups For"
+        title_bits = [f"{title_prefix} {champion_name}"]
+        if related_champion:
+            title_bits.append(f"filtered to {related_champion}")
+        elif related_role:
+            title_bits.append(f"filtered to {related_role}")
+
+        embed = discord.Embed(
+            title=" ".join(title_bits) + _title_filter_suffix(match_filters),
+            color=discord.Color.green() if relation == "with" else discord.Color.orange(),
+        )
+        if best_rows:
+            embed.add_field(name="Best", value="```\n" + "\n".join(self._format_record_rows(best_rows, name_key="champ", name_label="Champion")) + "\n```", inline=False)
+        if worst_rows:
+            embed.add_field(name="Worst", value="```\n" + "\n".join(self._format_record_rows(worst_rows, name_key="champ", name_label="Champion")) + "\n```", inline=False)
+
+        footer_parts = [f"Minimum {min_games} game{'s' if min_games != 1 else ''}", f"Fetched in {int((time.monotonic() - start_time) * 1000)}ms"]
+        active_filters = _filter_summary(match_filters)
+        if active_filters:
+            footer_parts.append("Filters: " + "; ".join(active_filters))
+        embed.set_footer(text="   •   ".join(footer_parts), icon_url=ctx.guild.icon.url if ctx.guild and ctx.guild.icon else None)
+        await ctx.send(embed=embed)
+
+    @commands.command(
+        name="champwith",
+        aliases=["champwithchamps"],
+        help="Show best and worst allied champion records for a champion. Usage: `!champwith <champion> [best|worst|both] [-m games] [related champion/role] [filters]`.",
+    )
+    async def champion_with_cmd(self, ctx, *args):
+        await self._champion_relationship_cmd(ctx, "with", *args)
+
+    @commands.command(
+        name="champagainst",
+        aliases=["champagainstchamps"],
+        help="Show best and worst enemy champion matchups for a champion. Usage: `!champagainst <champion> [best|worst|both] [-m games] [related champion/role] [filters]`.",
+    )
+    async def champion_against_cmd(self, ctx, *args):
+        await self._champion_relationship_cmd(ctx, "against", *args)
 
     async def _related_champs_slash(self, interaction, relation, user, player, mode, min_games, limit, role_or_champion, time_range, since, until, map_name, result, team, score, with_player, against_player):
         await interaction.response.defer()
