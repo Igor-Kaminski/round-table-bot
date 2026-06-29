@@ -35,7 +35,6 @@ from db import (
     get_champion_leaderboard,
     get_champion_relationship_records,
     compare_by_player_ids,
-    get_current_streak_records,
     get_enemy_records,
     get_pickrate_records,
     get_player_pair_summary,
@@ -728,8 +727,6 @@ class Stats(commands.Cog):
             "pickrate": "Pickrate Examples",
             "picks": "Pickrate Examples",
             "pr": "Pickrate Examples",
-            "streaks": "Streak Examples",
-            "streak": "Streak Examples",
             "match": "Match Screenshot Examples",
             "matchss": "Match Screenshot Examples",
             "screenshot": "Match Screenshot Examples",
@@ -768,7 +765,6 @@ class Stats(commands.Cog):
                 "`!examples cstats` - Overall champion stat examples.",
                 "`!examples talents` - Talent winrate examples.",
                 "`!examples pickrate` - Champion pickrate examples.",
-                "`!examples streaks` - Current streak examples.",
                 "`!examples match` - Saved match screenshot examples.",
                 "`!examples champcompare` - Champion comparison examples.",
                 "`!examples duo` - Specific teammate pair examples.",
@@ -899,7 +895,7 @@ class Stats(commands.Cog):
                 "`!talents nando s4` - Fernando talent winrates in Season 4.",
                 "`!talents grover -m 5` - Grover talents with at least 5 games.",
                 "`!talents ruckus map jaguar falls` - Ruckus talent records on Jaguar Falls.",
-                "`!talents pip worst` - Pip talents sorted from worst WR.",
+                "`!talents pip` - Pip talent winrates.",
             ],
             "pickrate": [
                 "`!pickrate` - Most picked champions.",
@@ -907,13 +903,6 @@ class Stats(commands.Cog):
                 "`!pickrate tank` - Tank pickrates.",
                 "`!pickrate support map jaguar falls` - Support pickrates on Jaguar Falls.",
                 "`!pickrate worst -m 10` - Least picked champions with at least 10 games.",
-            ],
-            "streaks": [
-                "`!streaks` - Biggest current win/loss streaks.",
-                "`!streaks wins` - Current win streaks only.",
-                "`!streaks losses` - Current loss streaks only.",
-                "`!streaks 20` - Show top 20 current streaks.",
-                "`!streaks wins s4` - Current win streaks within Season 4-filtered matches.",
             ],
             "match": [
                 "`!match 1280311793` - Show the saved screenshot for a match.",
@@ -973,8 +962,8 @@ class Stats(commands.Cog):
                 "`!againstchamps me nando map jaguar falls` - Your record against Fernando on Jaguar Falls.",
             ],
             "champwith": [
-                "`!champwith fernando` - Best and worst allied champions for Fernando.",
-                "`!champagainst fernando` - Best and worst enemy champion matchups for Fernando.",
+                "`!champwith fernando` - Allied champion records for Fernando.",
+                "`!champagainst fernando` - Enemy champion matchup records for Fernando.",
                 "`!champwith khan support s4` - Allied support records when Khan is played in Season 4.",
                 "`!champagainst atlas flank -m 5` - Atlas records against flank champions with 5+ games.",
                 "`!champagainst nando koga map jaguar falls` - Fernando record against Koga on Jaguar Falls.",
@@ -1374,16 +1363,6 @@ class Stats(commands.Cog):
             lines.append(f"{index:<3} {name:<14} {row['pickrate']:>6.1f}% {row['winrate']:>6.1f}% {row['games']:>3}")
         return lines
 
-    def _format_streak_rows(self, rows):
-        if not rows:
-            return ["No active streaks found."]
-        lines = [f"{'#':<3} {'Player':<14} {'Type':>5} {'Streak':>6}", "-" * 32]
-        for index, row in enumerate(rows, 1):
-            name = self._table_name(row.get("display_name") or row.get("player_ign"), 14)
-            label = "Win" if row.get("result") == "W" else "Loss"
-            lines.append(f"{index:<3} {name:<14} {label:>5} {row['streak']:>6}")
-        return lines
-
     def _parse_list_options(self, args, default_limit=10):
         mode = "both"
         min_games = 1
@@ -1414,7 +1393,7 @@ class Stats(commands.Cog):
     @commands.command(
         name="talents",
         aliases=["talentwr", "talentstats"],
-        help="Show talent winrates for a champion. Usage: `!talents <champion> [best|worst] [-m games] [filters]`.",
+        help="Show talent winrates for a champion. Usage: `!talents <champion> [-m games] [filters]`.",
     )
     async def talents_cmd(self, ctx, *args):
         start_time = time.monotonic()
@@ -1422,7 +1401,7 @@ class Stats(commands.Cog):
         if filter_error:
             await ctx.send(filter_error)
             return
-        args, mode, min_games, limit = self._parse_list_options(list(args), default_limit=10)
+        args, _mode, min_games, limit = self._parse_list_options(list(args), default_limit=10)
         if not args:
             await ctx.send("Usage: `!talents <champion> [filters]`, like `!talents fernando s4`.")
             return
@@ -1433,9 +1412,8 @@ class Stats(commands.Cog):
             await ctx.send(f"No champion found matching `{champion_input}`.")
             return
 
-        best_rows = get_talent_records(champion_name, limit=limit, show_bottom=False, min_games=min_games, filters=match_filters) if mode in {"best", "both"} else []
-        worst_rows = get_talent_records(champion_name, limit=limit, show_bottom=True, min_games=min_games, filters=match_filters) if mode in {"worst", "both"} else []
-        if not best_rows and not worst_rows:
+        rows = get_talent_records(champion_name, limit=limit, show_bottom=False, min_games=min_games, filters=match_filters)
+        if not rows:
             await ctx.send(f"No talent records found for {champion_name}{_title_filter_suffix(match_filters)}.")
             return
 
@@ -1443,10 +1421,7 @@ class Stats(commands.Cog):
             title=f"Talent Winrates for {champion_name}{_title_filter_suffix(match_filters)}",
             color=discord.Color.blue(),
         )
-        if best_rows:
-            embed.add_field(name="Best", value="```\n" + "\n".join(self._format_record_rows(best_rows, name_key="talent", name_label="Talent")) + "\n```", inline=False)
-        if worst_rows:
-            embed.add_field(name="Worst", value="```\n" + "\n".join(self._format_record_rows(worst_rows, name_key="talent", name_label="Talent")) + "\n```", inline=False)
+        embed.description = "```\n" + "\n".join(self._format_record_rows(rows, name_key="talent", name_label="Talent")) + "\n```"
         footer_parts = [f"Minimum {min_games} game{'s' if min_games != 1 else ''}", f"Fetched in {int((time.monotonic() - start_time) * 1000)}ms"]
         active_filters = _filter_summary(match_filters)
         if active_filters:
@@ -1487,41 +1462,6 @@ class Stats(commands.Cog):
         embed = discord.Embed(title=title, color=discord.Color.gold())
         embed.description = "```\n" + "\n".join(self._format_pickrate_rows(rows)) + "\n```"
         footer_parts = [f"Minimum {min_games} game{'s' if min_games != 1 else ''}", f"Fetched in {int((time.monotonic() - start_time) * 1000)}ms"]
-        active_filters = _filter_summary(match_filters)
-        if active_filters:
-            footer_parts.append("Filters: " + "; ".join(active_filters))
-        embed.set_footer(text="   •   ".join(footer_parts), icon_url=ctx.guild.icon.url if ctx.guild and ctx.guild.icon else None)
-        await ctx.send(embed=embed)
-
-    @commands.command(
-        name="streaks",
-        aliases=["streak"],
-        help="Show current player win/loss streaks. Usage: `!streaks [wins|losses|both] [limit] [filters]`.",
-    )
-    async def streaks_cmd(self, ctx, *args):
-        start_time = time.monotonic()
-        args, match_filters, filter_error = await _extract_match_filters(ctx, args)
-        if filter_error:
-            await ctx.send(filter_error)
-            return
-        streak_type = "both"
-        limit = 10
-        for arg in args:
-            key = str(arg).lower()
-            if key in {"wins", "win", "w", "losses", "loss", "l", "both", "all"}:
-                streak_type = "both" if key == "all" else key
-            elif key.isdigit():
-                limit = max(1, min(25, int(key)))
-
-        rows = get_current_streak_records(limit=limit, streak_type=streak_type, filters=match_filters)
-        rows = await self._with_display_names(rows)
-        if not rows:
-            await ctx.send(f"No streak data found{_title_filter_suffix(match_filters)}.")
-            return
-
-        embed = discord.Embed(title=f"Current Streaks{_title_filter_suffix(match_filters)}", color=discord.Color.purple())
-        embed.description = "```\n" + "\n".join(self._format_streak_rows(rows)) + "\n```"
-        footer_parts = [f"Fetched in {int((time.monotonic() - start_time) * 1000)}ms"]
         active_filters = _filter_summary(match_filters)
         if active_filters:
             footer_parts.append("Filters: " + "; ".join(active_filters))
@@ -2067,10 +2007,10 @@ class Stats(commands.Cog):
             await ctx.send(filter_error)
             return
 
-        args, mode, min_games, limit = self._parse_list_options(list(args), default_limit=10)
+        args, _mode, min_games, limit = self._parse_list_options(list(args), default_limit=10)
         if not args:
             command = "champwith" if relation == "with" else "champagainst"
-            await ctx.send(f"Usage: `!{command} <champion> [best|worst|both] [-m games] [related champion/role] [filters]`.")
+            await ctx.send(f"Usage: `!{command} <champion> [-m games] [related champion/role] [filters]`.")
             return
 
         champion_name = None
@@ -2097,23 +2037,18 @@ class Stats(commands.Cog):
                     await ctx.send(f"No related champion or role found matching `{filter_str}`.")
                     return
 
-        best_rows = get_champion_relationship_records(
+        rows = get_champion_relationship_records(
             champion_name, relation=relation, limit=limit, show_bottom=False,
             min_games=min_games, related_champion=related_champion,
             related_role=related_role, filters=match_filters,
-        ) if mode in {"best", "both"} else []
-        worst_rows = get_champion_relationship_records(
-            champion_name, relation=relation, limit=limit, show_bottom=True,
-            min_games=min_games, related_champion=related_champion,
-            related_role=related_role, filters=match_filters,
-        ) if mode in {"worst", "both"} else []
+        )
 
-        if not best_rows and not worst_rows:
+        if not rows:
             label = "allied" if relation == "with" else "enemy"
             await ctx.send(f"No {label} champion matchup records found for {champion_name}{_title_filter_suffix(match_filters)}.")
             return
 
-        title_prefix = "Best Allied Champions For" if relation == "with" else "Best Enemy Matchups For"
+        title_prefix = "Allied Champions With" if relation == "with" else "Enemy Matchups Against"
         title_bits = [f"{title_prefix} {champion_name}"]
         if related_champion:
             title_bits.append(f"filtered to {related_champion}")
@@ -2124,10 +2059,7 @@ class Stats(commands.Cog):
             title=" ".join(title_bits) + _title_filter_suffix(match_filters),
             color=discord.Color.green() if relation == "with" else discord.Color.orange(),
         )
-        if best_rows:
-            embed.add_field(name="Best", value="```\n" + "\n".join(self._format_record_rows(best_rows, name_key="champ", name_label="Champion")) + "\n```", inline=False)
-        if worst_rows:
-            embed.add_field(name="Worst", value="```\n" + "\n".join(self._format_record_rows(worst_rows, name_key="champ", name_label="Champion")) + "\n```", inline=False)
+        embed.description = "```\n" + "\n".join(self._format_record_rows(rows, name_key="champ", name_label="Champion")) + "\n```"
 
         footer_parts = [f"Minimum {min_games} game{'s' if min_games != 1 else ''}", f"Fetched in {int((time.monotonic() - start_time) * 1000)}ms"]
         active_filters = _filter_summary(match_filters)
@@ -2139,7 +2071,7 @@ class Stats(commands.Cog):
     @commands.command(
         name="champwith",
         aliases=["champwithchamps"],
-        help="Show best and worst allied champion records for a champion. Usage: `!champwith <champion> [best|worst|both] [-m games] [related champion/role] [filters]`.",
+        help="Show allied champion records for a champion. Usage: `!champwith <champion> [-m games] [related champion/role] [filters]`.",
     )
     async def champion_with_cmd(self, ctx, *args):
         await self._champion_relationship_cmd(ctx, "with", *args)
@@ -2147,7 +2079,7 @@ class Stats(commands.Cog):
     @commands.command(
         name="champagainst",
         aliases=["champagainstchamps"],
-        help="Show best and worst enemy champion matchups for a champion. Usage: `!champagainst <champion> [best|worst|both] [-m games] [related champion/role] [filters]`.",
+        help="Show enemy champion matchup records for a champion. Usage: `!champagainst <champion> [-m games] [related champion/role] [filters]`.",
     )
     async def champion_against_cmd(self, ctx, *args):
         await self._champion_relationship_cmd(ctx, "against", *args)

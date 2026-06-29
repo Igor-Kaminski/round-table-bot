@@ -1700,7 +1700,11 @@ def get_talent_records(champion, limit=10, show_bottom=False, min_games=1, filte
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
     try:
-        where_conditions = ["ps.champ = ?", "TRIM(COALESCE(ps.talent, '')) != ''"]
+        where_conditions = [
+            "ps.champ = ?",
+            "TRIM(COALESCE(ps.talent, '')) != ''",
+            "LOWER(TRIM(COALESCE(ps.talent, ''))) != 'unknown'",
+        ]
         params = [champion]
         _apply_match_filters(where_conditions, params, filters, player_alias="ps")
         where_clause = " AND ".join(where_conditions)
@@ -1780,81 +1784,6 @@ def get_pickrate_records(limit=20, show_bottom=False, min_games=1, role=None, fi
             item["pickrate"] = round(row["pickrate"] or 0, 2)
             rows.append(item)
         return rows
-    finally:
-        conn.close()
-
-
-def get_current_streak_records(limit=10, streak_type="both", filters=None):
-    conn = sqlite3.connect("match_data.db")
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
-    try:
-        where_conditions = ["p.discord_id IS NOT NULL"]
-        params = []
-        _apply_match_filters(where_conditions, params, filters, player_alias="ps")
-        where_clause = " AND ".join(where_conditions)
-
-        cursor.execute(f"""
-            SELECT
-                p.player_id,
-                p.player_ign,
-                p.discord_id,
-                ps.match_id,
-                CASE
-                    WHEN (ps.team = 1 AND m.team1_score > m.team2_score)
-                      OR (ps.team = 2 AND m.team2_score > m.team1_score)
-                    THEN 'W' ELSE 'L'
-                END AS result
-            FROM player_stats ps
-            JOIN matches m ON ps.match_id = m.match_id
-            JOIN players p ON ps.player_id = p.player_id
-            WHERE {where_clause}
-            ORDER BY p.player_id ASC, COALESCE(m.registered_at, 0) DESC, ps.player_stats_id DESC;
-        """, params)
-
-        streaks = []
-        current_player = None
-        current_result = None
-        current_count = 0
-        locked = False
-        row_info = None
-
-        desired_result = None
-        if streak_type in {"win", "wins", "w"}:
-            desired_result = "W"
-        elif streak_type in {"loss", "losses", "l"}:
-            desired_result = "L"
-
-        def flush():
-            if row_info and current_count:
-                if desired_result is None or current_result == desired_result:
-                    streaks.append({
-                        "player_id": row_info["player_id"],
-                        "player_ign": row_info["player_ign"],
-                        "discord_id": row_info["discord_id"],
-                        "result": current_result,
-                        "streak": current_count,
-                    })
-
-        for row in cursor.fetchall():
-            if row["player_id"] != current_player:
-                flush()
-                current_player = row["player_id"]
-                current_result = row["result"]
-                current_count = 1
-                locked = False
-                row_info = row
-                continue
-            if locked:
-                continue
-            if row["result"] == current_result:
-                current_count += 1
-            else:
-                locked = True
-        flush()
-
-        streaks.sort(key=lambda item: (-item["streak"], item["player_ign"].lower()))
-        return streaks[:limit]
     finally:
         conn.close()
 

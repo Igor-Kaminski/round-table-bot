@@ -62,9 +62,8 @@ class General(commands.Cog):
             ("rivals", "Focused record against one enemy player."),
             ("withchamps", "Records when champions are on your team."),
             ("againstchamps", "Records when champions are against you."),
-            ("champwith", "Best and worst allied champions for a champion."),
-            ("champagainst", "Best and worst enemy matchups for a champion."),
-            ("streaks", "Current player win/loss streaks."),
+            ("champwith", "Allied champion records for a champion."),
+            ("champagainst", "Enemy champion matchup records for a champion."),
         ],
         "Filters & Examples": [
             ("filters", "Show every filter style: season, map, score, with/against."),
