@@ -56,7 +56,9 @@ SEASON_FILTERS = {
 
 FILTER_KEYWORDS = {
     "map", "talent", "tal", "champ", "champs", "champion", "champions",
+    "withchamp", "withchamps", "ally", "allies", "allychamp", "allychamps",
     "notchamp", "notchamps", "exclude", "without",
+    "notwithchamp", "notwithchamps", "notally", "notallies", "noally", "noallies",
     "with", "against", "vs", "versus", "notvs", "notversus",
     *TIME_FILTER_KEYWORDS,
     *RESULT_FILTER_ALIASES.keys(),
@@ -231,6 +233,10 @@ def filter_summary(filters):
         labels.append("Champs: " + ", ".join(filters["include_champions"]))
     if filters.get("exclude_champions"):
         labels.append("Not Champs: " + ", ".join(filters["exclude_champions"]))
+    for champ in filters.get("with_champions", []):
+        labels.append(f"With Champ {champ}")
+    for champ in filters.get("not_with_champions", []):
+        labels.append(f"Not With Champ {champ}")
     if filters.get("result") == "wins":
         labels.append("Wins Only")
     elif filters.get("result") == "losses":
@@ -270,6 +276,10 @@ def title_filter_suffix(filters):
         parts.append("on " + "/".join(filters["include_champions"]))
     if filters.get("exclude_champions"):
         parts.append("without " + "/".join(filters["exclude_champions"]))
+    for champ in filters.get("with_champions", []):
+        parts.append(f"with {champ}")
+    for champ in filters.get("not_with_champions", []):
+        parts.append(f"not with {champ}")
     if filters.get("result") == "wins":
         parts.append("in Wins")
     elif filters.get("result") == "losses":
@@ -566,6 +576,34 @@ async def extract_match_filters(ctx, args):
             i = consumed_until
             continue
 
+        if key in {"withchamp", "withchamps", "ally", "allies", "allychamp", "allychamps"}:
+            champion_start = i + 1
+            if champion_start >= len(args):
+                return remaining, filters, f"`{arg}` needs at least one champion after it."
+            champions, consumed_until = _parse_champion_list(args, champion_start)
+            if not champions:
+                return remaining, filters, f"Could not find a champion matching `{args[champion_start]}`."
+            filters.setdefault("with_champions", [])
+            for champion in champions:
+                if champion not in filters["with_champions"]:
+                    filters["with_champions"].append(champion)
+            i = consumed_until
+            continue
+
+        if key in {"notwithchamp", "notwithchamps", "notally", "notallies", "noally", "noallies"}:
+            champion_start = i + 1
+            if champion_start >= len(args):
+                return remaining, filters, f"`{arg}` needs at least one champion after it."
+            champions, consumed_until = _parse_champion_list(args, champion_start)
+            if not champions:
+                return remaining, filters, f"Could not find a champion matching `{args[champion_start]}`."
+            filters.setdefault("not_with_champions", [])
+            for champion in champions:
+                if champion not in filters["not_with_champions"]:
+                    filters["not_with_champions"].append(champion)
+            i = consumed_until
+            continue
+
         if raw_key == "-not" or key in {"notchamp", "notchamps", "exclude", "without"} or (
             key == "not"
             and (i + 1 >= len(args) or compact_arg(args[i + 1]) not in {"vs", "versus"})
@@ -590,6 +628,8 @@ async def extract_match_filters(ctx, args):
             try:
                 player = await PlayerConverter().convert(ctx, player_arg)
             except commands.BadArgument as exc:
+                if resolve_champion_name(player_arg):
+                    return remaining, filters, f"`with {player_arg}` means with a player. Use `withchamp {player_arg}` or `ally {player_arg}` for a champion teammate filter."
                 return remaining, filters, str(exc)
 
             player_id = resolve_player_id(player)

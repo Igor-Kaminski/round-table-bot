@@ -887,6 +887,7 @@ class Stats(commands.Cog):
                 "`!cstats nando talent scorch` - Fernando stats while using Scorch.",
                 "`!cstats nando vs koga` - Fernando stats only when the enemy team had Koga.",
                 "`!cstats nando notvs lex` - Fernando stats when the enemy team did not have Lex.",
+                "`!cstats grover withchamp azaan` - Grover stats when Azaan was on Grover's team.",
                 "`!cstats nando vs koga notvs lex` - Stack multiple champion matchup filters.",
                 "`!cstats bk map jaguar falls season 3` - Bomb King stats on Jaguar Falls in Season 3.",
             ],
@@ -982,6 +983,8 @@ class Stats(commands.Cog):
                 "`against <player>` - Enemy team, e.g. `!lb wr ash against nozy`.",
                 "`vs <champion>` - Enemy team has that champion, e.g. `!cstats nando vs koga`.",
                 "`notvs <champion>` - Enemy team does not have that champion, e.g. `!lb wr nando notvs lex`.",
+                "`withchamp <champion>` / `ally <champion>` - Your team has that champion, e.g. `!cstats grover withchamp azaan`.",
+                "`notwithchamp <champion>` / `notally <champion>` - Your team does not have that champion.",
                 "`champs <champions>` - Only these champions, e.g. `!lb delta champs nando inara nyx terminus`.",
                 "`not <champion>` / `-not <champion>` - Exclude own champion, e.g. `!lb delta pointtank -m 5 -not barik`.",
             ],
@@ -1084,6 +1087,8 @@ class Stats(commands.Cog):
                     "`against <player>` - enemy team against that player.\n"
                     "`vs <champion>` - enemy team has that champion.\n"
                     "`notvs <champion>` - enemy team does not have that champion.\n"
+                    "`withchamp <champion>` / `ally <champion>` - same team has that champion.\n"
+                    "`notwithchamp <champion>` / `notally <champion>` - same team does not have that champion.\n"
                     "Example: `!lb wr barik last 7d map brightmarsh with pjamo`."
                 ),
                 inline=False,
@@ -2503,7 +2508,8 @@ Shows champion statistics breakdown for a player.
         stat_aliases = {
             '-wr': '-winrate',
             '-dmg': '-damage_pm', 
-            '-dpm': '-deaths_pm',
+            '-dpm': '-damage_pm',
+            '-d': '-deaths_pm',
             '-avg_dmg': '-avg_damage_dealt',
             '-avg_taken': '-avg_damage_taken',
             '-avg_heal': '-avg_healing',
@@ -2527,6 +2533,29 @@ Shows champion statistics breakdown for a player.
             '-shpm': '-shielding_pm',
             '-shielding_pm': '-shielding_pm',
         }
+        bare_stat_aliases = {
+            key[1:]: value for key, value in stat_aliases.items()
+        }
+        bare_stat_aliases.update({
+            "winrate": "-winrate",
+            "wr": "-winrate",
+            "kda": "-kda",
+            "kp": "-kp",
+            "dmg_share": "-dmg_share",
+            "dpm": "-damage_pm",
+            "dmg": "-damage_pm",
+            "damage": "-damage_pm",
+            "deaths_pm": "-deaths_pm",
+            "death_pm": "-deaths_pm",
+            "kpm": "-kills_pm",
+            "heal_pm": "-healing_pm",
+            "hpm": "-healing_pm",
+            "dhpm": "-damage_healing_pm",
+            "shield_pm": "-shielding_pm",
+            "shpm": "-shielding_pm",
+            "creds_pm": "-credits_pm",
+            "delta": "-damage_delta",
+        })
         
         # Valid stat keys
         valid_stats = {
@@ -2554,8 +2583,9 @@ Shows champion statistics breakdown for a player.
                 continue
             
             # Check for stat flags
-            if arg.lower().startswith('-'):
-                normalized = stat_aliases.get(arg.lower(), arg.lower())
+            lower_arg = arg.lower()
+            if lower_arg.startswith('-') or lower_arg in bare_stat_aliases:
+                normalized = stat_aliases.get(lower_arg, bare_stat_aliases.get(lower_arg, lower_arg))
                 if normalized in valid_stats:
                     # Remove the dash and store the actual key
                     stat_key = normalized[1:].replace('_pm', '_pm').replace('damage_pm', 'damage_dealt_pm')
@@ -2630,7 +2660,7 @@ Shows champion statistics breakdown for a player.
             return
         
         # Sort by first stat flag (or games if using defaults)
-        sort_key = stat_flags[0] if stat_flags[0] not in ['time_played'] else 'games'
+        sort_key = "kda_ratio" if stat_flags[0] == "kda" else stat_flags[0] if stat_flags[0] not in ['time_played'] else 'games'
         champ_data.sort(key=lambda x: x.get(sort_key, 0), reverse=True)
         
         # Build the display
@@ -2686,7 +2716,7 @@ Shows champion statistics breakdown for a player.
         stat_display_names = {
             'winrate': 'WR%',
             'kda_ratio': 'KDA',
-            'kda': 'K/D/A',
+            'kda': 'KDA',
             'kills_pm': 'K/min',
             'deaths_pm': 'D/min',
             'damage_dealt_pm': 'DMG/min',
@@ -2720,7 +2750,7 @@ Shows champion statistics breakdown for a player.
         col_widths = {'champ': 16}
         for stat in stat_flags:
             display_name = stat_display_names.get(stat, stat)
-            col_widths[stat] = max(len(display_name) + 2, 10)
+            col_widths[stat] = max(len(display_name) + 2, 22 if stat == "kda" else 10)
         
         # Build header
         header_parts = [f"{'Champion':<16}"]
@@ -2744,9 +2774,12 @@ Shows champion statistics breakdown for a player.
                     for i, champ in enumerate(role_champs[:10], 1):  # Limit to top 10 per role
                         row_parts = [f"{i}. {champ['champ'][:14]:<14}"]
                         for stat in stat_flags:
-                            value = champ.get(stat, 0)
-                            formatter = stat_formatters.get(stat, str)
-                            formatted = formatter(value)
+                            if stat == "kda":
+                                formatted = f"{champ.get('kda_ratio', 0):.2f} ({champ.get('kda', '0/0/0')})"
+                            else:
+                                value = champ.get(stat, 0)
+                                formatter = stat_formatters.get(stat, str)
+                                formatted = formatter(value)
                             row_parts.append(f"{formatted:<{col_widths[stat]}}")
                         lines.append("".join(row_parts))
                     lines.append("")
@@ -2758,9 +2791,12 @@ Shows champion statistics breakdown for a player.
             for i, champ in enumerate(champ_data[:30], 1):  # Limit to top 30
                 row_parts = [f"{i}. {champ['champ'][:14]:<14}"]
                 for stat in stat_flags:
-                    value = champ.get(stat, 0)
-                    formatter = stat_formatters.get(stat, str)
-                    formatted = formatter(value)
+                    if stat == "kda":
+                        formatted = f"{champ.get('kda_ratio', 0):.2f} ({champ.get('kda', '0/0/0')})"
+                    else:
+                        value = champ.get(stat, 0)
+                        formatter = stat_formatters.get(stat, str)
+                        formatted = formatter(value)
                     row_parts.append(f"{formatted:<{col_widths[stat]}}")
                 lines.append("".join(row_parts))
         

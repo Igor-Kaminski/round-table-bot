@@ -192,6 +192,34 @@ def _apply_match_filters(where_conditions, params, filters=None, player_alias="p
         )
         params.append(champ)
 
+    for champ in filters.get("with_champions", []):
+        where_conditions.append(
+            f"""
+            EXISTS (
+                SELECT 1 FROM player_stats ally_champ_ps
+                WHERE ally_champ_ps.match_id = {player_alias}.match_id
+                  AND ally_champ_ps.champ = ?
+                  AND ally_champ_ps.team = {player_alias}.team
+                  AND ally_champ_ps.player_stats_id != {player_alias}.player_stats_id
+            )
+            """
+        )
+        params.append(champ)
+
+    for champ in filters.get("not_with_champions", []):
+        where_conditions.append(
+            f"""
+            NOT EXISTS (
+                SELECT 1 FROM player_stats ally_champ_ps
+                WHERE ally_champ_ps.match_id = {player_alias}.match_id
+                  AND ally_champ_ps.champ = ?
+                  AND ally_champ_ps.team = {player_alias}.team
+                  AND ally_champ_ps.player_stats_id != {player_alias}.player_stats_id
+            )
+            """
+        )
+        params.append(champ)
+
     if filters.get("with_player_id"):
         where_conditions.append(
             f"""
