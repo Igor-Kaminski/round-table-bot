@@ -132,6 +132,16 @@ def _apply_match_filters(where_conditions, params, filters=None, player_alias="p
         where_conditions.append(f"LOWER(TRIM({player_alias}.talent)) LIKE ?")
         params.append(f"%{str(filters['talent']).lower().strip()}%")
 
+    if filters.get("include_champions"):
+        placeholders = ", ".join("?" for _ in filters["include_champions"])
+        where_conditions.append(f"{player_alias}.champ IN ({placeholders})")
+        params.extend(filters["include_champions"])
+
+    if filters.get("exclude_champions"):
+        placeholders = ", ".join("?" for _ in filters["exclude_champions"])
+        where_conditions.append(f"{player_alias}.champ NOT IN ({placeholders})")
+        params.extend(filters["exclude_champions"])
+
     if filters.get("result") == "wins":
         where_conditions.append(_win_condition(player_alias))
     elif filters.get("result") == "losses":
@@ -1314,6 +1324,7 @@ def get_player_stats(player_id, champions=None, filters=None):
             "deaths_pm": round(data["total_deaths"] / max(1, total_time_in_minutes), 2),
             "damage_dealt_pm": round(data["total_damage"] / max(1, total_time_in_minutes), 2),
             "damage_taken_pm": round(data["total_taken"] / max(1, total_time_in_minutes), 2),
+            "shielding_pm": round(data["total_shielding"] / max(1, total_time_in_minutes), 2),
             "self_healing_pm": round(data["total_self_healing"] / max(1, total_time_in_minutes), 2),
             "credits_pm": round(data["total_credits"] / max(1, total_time_in_minutes), 2),
             "obj_time": round(data["total_obj_time"] / games_played, 2) if games_played > 0 else 0,
@@ -2146,6 +2157,7 @@ def get_champion_overall_stats(champion, filters=None):
             "dpm": round(damage / minutes, 2),
             "taken_pm": round((row["taken"] or 0) / minutes, 2),
             "hpm": round(healing / minutes, 2),
+            "shield_pm": round((row["shielding"] or 0) / minutes, 2),
             "self_heal_pm": round((row["self_healing"] or 0) / minutes, 2),
             "credits_pm": round((row["credits"] or 0) / minutes, 2),
             "avg_kills": round((row["kills"] or 0) / games, 2),
@@ -2175,6 +2187,7 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
         "damage_taken_pm": "SUM(CAST(ps.taken AS REAL)) / SUM(m.time)",
         "healing_pm": "SUM(CAST(ps.healing AS REAL)) / SUM(m.time)",
         "damage_healing_pm": "SUM(CAST(ps.damage + ps.healing AS REAL)) / SUM(m.time)",
+        "shielding_pm": "SUM(CAST(ps.shielding AS REAL)) / SUM(m.time)",
         "self_healing_pm": "SUM(CAST(ps.self_healing AS REAL)) / SUM(m.time)",
         "credits_pm": "SUM(CAST(ps.credits AS REAL)) / SUM(m.time)",
         "avg_kills": "AVG(ps.kills)",
@@ -2189,6 +2202,7 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
         "obj_time": "AVG(ps.objective_time)",
         "kp": "AVG(ps.kill_share)",
         "dmg_share": "AVG(ps.damage_share)",
+        "damage_healed_pct": "SUM(CAST(ps.healing AS REAL)) * 100.0 / NULLIF(SUM(ps.enemy_team_damage), 0)",
     }
 
     if stat_key not in stat_expressions:
@@ -2197,7 +2211,7 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
     order = "ASC" if show_bottom else "DESC"
     params = []
     where_conditions = ["p.discord_id IS NOT NULL", "m.time > 0"]
-    healing_only_stats = ["healing_pm", "avg_healing", "damage_healing_pm"]
+    healing_only_stats = ["healing_pm", "avg_healing", "damage_healing_pm", "damage_healed_pct"]
 
     if champion:
         champion = resolve_champion_name(champion) or champion
@@ -2232,10 +2246,12 @@ def get_leaderboard(stat_key, limit, show_bottom=False, champion=None, role=None
         MatchShares AS (
             SELECT 
                 ps.*,
+                COALESCE(ott.team_damage, 0) AS enemy_team_damage,
                 CASE WHEN tt.team_kill_participations > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kill_participations ELSE 0 END as kill_share,
                 CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END as damage_share
             FROM player_stats ps
             JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
+            LEFT JOIN TeamTotals ott ON ps.match_id = ott.match_id AND ps.team != ott.team
         ),
         PlayerAggregates AS (
             SELECT
@@ -2471,10 +2487,12 @@ def get_player_champion_stats(player_id, role_filter=None, min_games=1, filters=
             PlayerMatchShares AS (
                 SELECT 
                     ps.*,
+                    COALESCE(ott.team_damage, 0) AS enemy_team_damage,
                     CASE WHEN tt.team_kill_participations > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kill_participations ELSE 0 END as kill_share,
                     CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END as damage_share
                 FROM player_stats ps
                 JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
+                LEFT JOIN TeamTotals ott ON ps.match_id = ott.match_id AND ps.team != ott.team
                 WHERE {where_clause}
             )
             SELECT
@@ -2489,6 +2507,7 @@ def get_player_champion_stats(player_id, role_filter=None, min_games=1, filters=
                 SUM(pms.objective_time) as total_obj_time,
                 SUM(pms.shielding) as total_shielding,
                 SUM(pms.healing) as total_healing,
+                SUM(pms.enemy_team_damage) as total_enemy_damage,
                 SUM(pms.self_healing) as total_self_healing,
                 SUM(pms.credits) as total_credits,
                 SUM(m.time) as total_minutes,
@@ -2539,6 +2558,8 @@ def get_player_champion_stats(player_id, role_filter=None, min_games=1, filters=
                 "damage_taken_pm": round(champ_data['total_taken'] / total_minutes, 2),
                 "healing_pm": round(champ_data['total_healing'] / total_minutes, 2),
                 "damage_healing_pm": round((champ_data['total_damage'] + champ_data['total_healing']) / total_minutes, 2),
+                "damage_healed_pct": round(champ_data['total_healing'] * 100.0 / champ_data['total_enemy_damage'], 2) if champ_data['total_enemy_damage'] else 0,
+                "shielding_pm": round(champ_data['total_shielding'] / total_minutes, 2),
                 "self_healing_pm": round(champ_data['total_self_healing'] / total_minutes, 2),
                 "credits_pm": round(champ_data['total_credits'] / total_minutes, 2),
                 "avg_kills": round(champ_data['avg_kills'], 2),
@@ -2610,6 +2631,7 @@ def get_champion_leaderboard(stat_key, limit, show_bottom=False, role=None, min_
         "damage_taken_pm": "SUM(CAST(ms.taken AS REAL)) / SUM(m.time)",
         "healing_pm": "SUM(CAST(ms.healing AS REAL)) / SUM(m.time)",
         "damage_healing_pm": "SUM(CAST(ms.damage + ms.healing AS REAL)) / SUM(m.time)",
+        "shielding_pm": "SUM(CAST(ms.shielding AS REAL)) / SUM(m.time)",
         "self_healing_pm": "SUM(CAST(ms.self_healing AS REAL)) / SUM(m.time)",
         "credits_pm": "SUM(CAST(ms.credits AS REAL)) / SUM(m.time)",
         "avg_kills": "AVG(ms.kills)",
@@ -2624,6 +2646,7 @@ def get_champion_leaderboard(stat_key, limit, show_bottom=False, role=None, min_
         "obj_time": "AVG(ms.objective_time)",
         "kp": "AVG(ms.kill_share)",
         "dmg_share": "AVG(ms.damage_share)",
+        "damage_healed_pct": "SUM(CAST(ms.healing AS REAL)) * 100.0 / NULLIF(SUM(ms.enemy_team_damage), 0)",
     }
 
     if stat_key not in stat_expressions:
@@ -2661,10 +2684,12 @@ def get_champion_leaderboard(stat_key, limit, show_bottom=False, role=None, min_
         MatchShares AS (
             SELECT 
                 ps.*,
+                COALESCE(ott.team_damage, 0) AS enemy_team_damage,
                 CASE WHEN tt.team_kill_participations > 0 THEN CAST(ps.kills + ps.assists AS REAL) * 100.0 / tt.team_kill_participations ELSE 0 END as kill_share,
                 CASE WHEN tt.team_damage > 0 THEN CAST(ps.damage AS REAL) * 100.0 / tt.team_damage ELSE 0 END as damage_share
             FROM player_stats ps
             JOIN TeamTotals tt ON ps.match_id = tt.match_id AND ps.team = tt.team
+            LEFT JOIN TeamTotals ott ON ps.match_id = ott.match_id AND ps.team != ott.team
         ),
         ChampionAggregates AS (
             SELECT

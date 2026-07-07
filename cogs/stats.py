@@ -982,6 +982,8 @@ class Stats(commands.Cog):
                 "`against <player>` - Enemy team, e.g. `!lb wr ash against nozy`.",
                 "`vs <champion>` - Enemy team has that champion, e.g. `!cstats nando vs koga`.",
                 "`notvs <champion>` - Enemy team does not have that champion, e.g. `!lb wr nando notvs lex`.",
+                "`champs <champions>` - Only these champions, e.g. `!lb delta champs nando inara nyx terminus`.",
+                "`not <champion>` / `-not <champion>` - Exclude own champion, e.g. `!lb delta pointtank -m 5 -not barik`.",
             ],
             "aliases": [
                 "`bk` = Bomb King, e.g. `!lb dmg bk`.",
@@ -1067,6 +1069,8 @@ class Stats(commands.Cog):
                 value=(
                     "`map <name>` - map only, e.g. `map jaguar falls`.\n"
                     "`talent <name>` / `-talent <name>` - talent only, e.g. `talent scorch`.\n"
+                    "`champs <champions>` - only listed champions, e.g. `champs nando inara nyx terminus`.\n"
+                    "`not <champion>` / `-not <champion>` - exclude own champion, e.g. `-not barik`.\n"
                     "`wins` / `losses` - result only.\n"
                     "`team1` / `team2` - draft side.\n"
                     "`4-3`, `close`, `stomp`, `sweep` - score filters."
@@ -1238,6 +1242,7 @@ class Stats(commands.Cog):
             "Damage/Min": f"{int(stats['dpm']):,}",
             "Damage Taken/Min": f"{int(stats['taken_pm']):,}",
             "Healing/Min": f"{int(stats['hpm']):,}",
+            "Shielding/Min": f"{int(stats['shield_pm']):,}",
             "Self Healing/Min": f"{int(stats['self_heal_pm']):,}",
             "Credits/Min": f"{int(stats['credits_pm']):,}",
             "--- Per Match ---": "",
@@ -2241,6 +2246,7 @@ class Stats(commands.Cog):
                     "Damage/Min": f"{int(role_stats['damage_dealt_pm']):,}",
                     "Damage Taken/Min": f"{int(role_stats['damage_taken_pm']):,}",
                     "Healing/Min": f"{int(role_stats['healing_pm']):,}",
+                    "Shielding/Min": f"{int(role_stats['shielding_pm']):,}",
                     "Self Healing/Min": f"{int(role_stats['self_healing_pm']):,}",
                     "Credits/Min": f"{int(role_stats['credits_pm']):,}",
                     "--- Per Match ---": "",
@@ -2294,6 +2300,7 @@ class Stats(commands.Cog):
                     "Damage/Min": f"{int(champ_stats['damage_dealt_pm']):,}",
                     "Damage Taken/Min": f"{int(champ_stats['damage_taken_pm']):,}",
                     "Healing/Min": f"{int(champ_stats['healing_pm']):,}",
+                    "Shielding/Min": f"{int(champ_stats['shielding_pm']):,}",
                     "Self Healing/Min": f"{int(champ_stats['self_healing_pm']):,}",
                     "Credits/Min": f"{int(champ_stats['credits_pm']):,}",
                     "AVG Kills": f"{champ_stats['avg_kills']:.2f}",
@@ -2341,6 +2348,7 @@ class Stats(commands.Cog):
                 "Damage/Min": f"{int(stats['damage_dealt_pm']):,}",
                 "Damage Taken/Min": f"{int(stats['damage_taken_pm']):,}",
                 "Healing/Min": f"{int(stats['healing_pm']):,}",
+                "Shielding/Min": f"{int(stats['shielding_pm']):,}",
                 "Self Healing/Min": f"{int(stats['self_healing_pm']):,}",
                 "Credits/Min": f"{int(stats['credits_pm']):,}",
                 "--- Per Match ---": "",
@@ -2443,6 +2451,8 @@ Shows champion statistics breakdown for a player.
 - `-taken_pm`: Damage taken per minute
 - `-heal_pm`: Healing per minute
 - `-dhpm` or `-dmg_heal_pm`: Damage + healing per minute
+- `-damage_healed` or `-dh`: Healing as % of enemy team damage
+- `-shield_pm` or `-shpm`: Shielding per minute
 - `-self_heal_pm`: Self healing per minute
 - `-creds_pm`: Credits per minute
 - `-kp`: Kill participation %
@@ -2462,6 +2472,7 @@ Shows champion statistics breakdown for a player.
 - `!top` - Shows default stats (games, winrate, KDA, time)
 - `!top me` - Shows your champion table.
 - `!top -kpm -dmg_share` - Shows kills/min and damage share
+- `!top me -dh support` - Shows support damage-healed percentage
 - `!top tank -m 5` - Shows tanks with 5+ games
 - `!top me bk` - Shows your Bomb King stats.
 - `!top me point tank` - Shows your point tanks.
@@ -2508,13 +2519,20 @@ Shows champion statistics breakdown for a player.
             '-dmg_heal_pm': '-damage_healing_pm',
             '-dmg_healing_pm': '-damage_healing_pm',
             '-damage_heal_pm': '-damage_healing_pm',
+            '-damage_healed': '-damage_healed_pct',
+            '-dmg_healed': '-damage_healed_pct',
+            '-dh': '-damage_healed_pct',
+            '-dhpct': '-damage_healed_pct',
+            '-shield_pm': '-shielding_pm',
+            '-shpm': '-shielding_pm',
+            '-shielding_pm': '-shielding_pm',
         }
         
         # Valid stat keys
         valid_stats = {
             '-winrate', '-kda', '-kda_ratio', '-kills_pm', '-deaths_pm', 
             '-damage_pm', '-damage_dealt_pm', '-damage_taken_pm', '-healing_pm',
-            '-damage_healing_pm',
+            '-damage_healing_pm', '-damage_healed_pct', '-shielding_pm',
             '-self_healing_pm', '-credits_pm', '-kp', '-dmg_share',
             '-avg_kills', '-avg_deaths', '-avg_damage_dealt', '-avg_damage_taken',
             '-damage_delta', '-avg_healing', '-avg_self_healing', '-avg_shielding',
@@ -2644,6 +2662,8 @@ Shows champion statistics breakdown for a player.
             'damage_taken_pm': lambda v: f"{int(v):,}",
             'healing_pm': lambda v: f"{int(v):,}",
             'damage_healing_pm': lambda v: f"{int(v):,}",
+            'damage_healed_pct': lambda v: f"{v:.1f}%",
+            'shielding_pm': lambda v: f"{int(v):,}",
             'self_healing_pm': lambda v: f"{int(v):,}",
             'credits_pm': lambda v: f"{int(v):,}",
             'kp': lambda v: f"{v:.1f}%",
@@ -2673,6 +2693,8 @@ Shows champion statistics breakdown for a player.
             'damage_taken_pm': 'Taken/min',
             'healing_pm': 'Heal/min',
             'damage_healing_pm': 'D+H/min',
+            'damage_healed_pct': 'DHeal%',
+            'shielding_pm': 'Shield/min',
             'self_healing_pm': 'SHeal/min',
             'credits_pm': 'Creds/min',
             'kp': 'KP%',
@@ -3495,12 +3517,14 @@ Shows player rankings, with optional filters for champions or roles.
 - `kda`: Kill/Death/Assist Ratio
 - `kp`: Kill Participation (% of team kills + assists)
 - `dmg_share`: Damage Share (% of team damage)
+- `damage_healed` (or `dh`): Healing as % of enemy team damage (Defaults to Supports)
 - `kpm`: Kills per Minute
 - `deaths_pm`: Deaths per Minute
 - `dmg` (or `dpm`): Damage per Minute
 - `taken_pm`: Damage Taken per Minute
 - `heal_pm`: Healing per Minute (Defaults to Supports)
 - `dhpm`: Damage + Healing per Minute (Defaults to Supports)
+- `shield_pm` (or `shpm`): Shielding per Minute
 - `self_heal_pm`: Self Healing per Minute
 - `creds_pm`: Credits per Minute
 - `avg_kills`: Average Kills per Match
@@ -3519,6 +3543,8 @@ Shows player rankings, with optional filters for champions or roles.
 - `!lb heal_pm tank`: Top 20 healers on Tank champions.
 - `!lb kp tank`: Top 20 tanks by kill participation.
 - `!lb dmg_share dmg`: Top 20 damage dealers by damage share.
+- `!lb damage_healed`: Top 20 supports by healing as % of enemy damage.
+- `!lb shield_pm tank`: Top 20 tanks by shielding per minute.
 - `!lb wr barik team2`: Barik winrate on Team 2.
 - `!lb kp moji losses`: Moji KP in losses only.
 - `!lb wr support map jaguar falls`: Support winrate on Jaguar Falls.
@@ -3538,6 +3564,14 @@ Shows player rankings, with optional filters for champions or roles.
             "kda": ("KDA Ratio", "kda", lambda v, s: f"{v:.2f} ({s['k']}/{s['d']}/{s['a']})"),
             "kp": ("Kill Participation", "kp", lambda v, s: f"{v:.2f}%"),
             "dmg_share": ("Damage Share", "dmg_share", lambda v, s: f"{v:.2f}%"),
+            "damage_healed": ("Damage Healed", "damage_healed_pct", lambda v, s: f"{v:.2f}%"),
+            "damage_healed_pct": ("Damage Healed", "damage_healed_pct", lambda v, s: f"{v:.2f}%"),
+            "dmg_healed": ("Damage Healed", "damage_healed_pct", lambda v, s: f"{v:.2f}%"),
+            "dh": ("Damage Healed", "damage_healed_pct", lambda v, s: f"{v:.2f}%"),
+            "dhpct": ("Damage Healed", "damage_healed_pct", lambda v, s: f"{v:.2f}%"),
+            "shield_pm": ("Shielding/Min", "shielding_pm", lambda v, s: f"{int(v):,}"),
+            "shielding_pm": ("Shielding/Min", "shielding_pm", lambda v, s: f"{int(v):,}"),
+            "shpm": ("Shielding/Min", "shielding_pm", lambda v, s: f"{int(v):,}"),
             "kpm": ("Kills/Min", "kills_pm", lambda v, s: f"{v:.2f}"),
             "deaths_pm": ("Deaths/Min", "deaths_pm", lambda v, s: f"{v:.2f}"),
             "dmg_pm": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),
@@ -3621,7 +3655,7 @@ Shows player rankings, with optional filters for champions or roles.
         
         # --- 2. Fetch Data ---
         display_name, data_key, formatter = stat_map[stat_alias]
-        if not champion_filter and not role_filter and data_key in ["healing_pm", "avg_healing", "damage_healing_pm"]:
+        if not champion_filter and not role_filter and data_key in ["healing_pm", "avg_healing", "damage_healing_pm", "damage_healed_pct"]:
             role_filter = "Support"
         leaderboard_data = get_leaderboard(
             data_key, limit, show_bottom,
@@ -3630,7 +3664,7 @@ Shows player rankings, with optional filters for champions or roles.
         if not leaderboard_data:
             filter_name = champion_filter.title() if champion_filter else role_filter if role_filter else ""
             # Add a note if it's a healing stat and no filter was applied
-            if not filter_name and data_key in ["healing_pm", "avg_healing", "damage_healing_pm"]:
+            if not filter_name and data_key in ["healing_pm", "avg_healing", "damage_healing_pm", "damage_healed_pct"]:
                  filter_name = "Supports"
             filter_msg = f" as {filter_name}" if filter_name else ""
             await ctx.send(f"Could not generate a leaderboard for `{display_name}`{filter_msg}. No qualified player data found.")
@@ -4042,12 +4076,14 @@ Shows champion rankings aggregated across all players.
 - `kda`: Kill/Death/Assist Ratio
 - `kp`: Kill Participation (% of team kills + assists)
 - `dmg_share`: Damage Share (% of team damage)
+- `damage_healed` (or `dh`): Healing as % of enemy team damage
 - `kpm`: Kills per Minute
 - `deaths_pm`: Deaths per Minute
 - `dmg` (or `dpm`): Damage per Minute
 - `taken_pm`: Damage Taken per Minute
 - `heal_pm`: Healing per Minute
 - `dhpm`: Damage + Healing per Minute
+- `shield_pm` (or `shpm`): Shielding per Minute
 - `self_heal_pm`: Self Healing per Minute
 - `creds_pm`: Credits per Minute
 - `avg_kills`: Average Kills per Match
@@ -4067,6 +4103,8 @@ Shows champion rankings aggregated across all players.
 - `!clb winrate tank`: Top 20 tanks by winrate.
 - `!clb winrate point tank`: Top point tanks by winrate.
 - `!clb kp -m 50`: Top champions by kill participation (min 50 games).
+- `!clb damage_healed support`: Support champions by healing as % of enemy damage.
+- `!clb shield_pm tank`: Tank champions by shielding per minute.
 - `!clb deaths_pm -b`: Bottom 20 champions by deaths per minute.
 - `!clb wr support team1 map stone keep night`: Support champion winrate on Team 1 for Stone Keep Night.
 - `!clb kp close`: Champion KP in close games only.
@@ -4084,6 +4122,14 @@ Shows champion rankings aggregated across all players.
             "kda": ("KDA Ratio", "kda", lambda v, s: f"{v:.2f} ({s['k']}/{s['d']}/{s['a']})"),
             "kp": ("Kill Participation", "kp", lambda v, s: f"{v:.2f}%"),
             "dmg_share": ("Damage Share", "dmg_share", lambda v, s: f"{v:.2f}%"),
+            "damage_healed": ("Damage Healed", "damage_healed_pct", lambda v, s: f"{v:.2f}%"),
+            "damage_healed_pct": ("Damage Healed", "damage_healed_pct", lambda v, s: f"{v:.2f}%"),
+            "dmg_healed": ("Damage Healed", "damage_healed_pct", lambda v, s: f"{v:.2f}%"),
+            "dh": ("Damage Healed", "damage_healed_pct", lambda v, s: f"{v:.2f}%"),
+            "dhpct": ("Damage Healed", "damage_healed_pct", lambda v, s: f"{v:.2f}%"),
+            "shield_pm": ("Shielding/Min", "shielding_pm", lambda v, s: f"{int(v):,}"),
+            "shielding_pm": ("Shielding/Min", "shielding_pm", lambda v, s: f"{int(v):,}"),
+            "shpm": ("Shielding/Min", "shielding_pm", lambda v, s: f"{int(v):,}"),
             "kpm": ("Kills/Min", "kills_pm", lambda v, s: f"{v:.2f}"),
             "deaths_pm": ("Deaths/Min", "deaths_pm", lambda v, s: f"{v:.2f}"),
             "dmg_pm": ("Damage/Min", "damage_dealt_pm", lambda v, s: f"{int(v):,}"),

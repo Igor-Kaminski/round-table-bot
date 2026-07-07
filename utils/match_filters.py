@@ -55,7 +55,9 @@ SEASON_FILTERS = {
 }
 
 FILTER_KEYWORDS = {
-    "map", "talent", "tal", "with", "against", "vs", "versus", "notvs", "notversus",
+    "map", "talent", "tal", "champ", "champs", "champion", "champions",
+    "notchamp", "notchamps", "exclude", "without",
+    "with", "against", "vs", "versus", "notvs", "notversus",
     *TIME_FILTER_KEYWORDS,
     *RESULT_FILTER_ALIASES.keys(),
     *TEAM_FILTER_ALIASES.keys(),
@@ -81,6 +83,7 @@ def _is_filter_boundary(arg):
     key = compact_arg(arg)
     return (
         raw_key == "-m"
+        or raw_key == "-not"
         or raw_key.startswith("-")
         or key in FILTER_KEYWORDS
         or season_key(arg) is not None
@@ -146,6 +149,28 @@ def _parse_date_end(arg):
     return None
 
 
+def _parse_champion_list(args, start_index):
+    champions = []
+    index = start_index
+
+    while index < len(args) and not _is_filter_boundary(args[index]):
+        resolved_champion = None
+        consumed_until = index
+        for end in range(len(args), index, -1):
+            candidate = " ".join(str(part) for part in args[index:end])
+            resolved_champion = resolve_champion_name(candidate)
+            if resolved_champion:
+                consumed_until = end
+                break
+        if not resolved_champion:
+            break
+        if resolved_champion not in champions:
+            champions.append(resolved_champion)
+        index = consumed_until
+
+    return champions, index
+
+
 def _date_filter_error(arg):
     return f"`{arg}` is not a valid date. Use `YYYY-MM-DD`, for example `2026-05-25`."
 
@@ -202,6 +227,10 @@ def filter_summary(filters):
         labels.append(f"Map: {filters['map']}")
     if filters.get("talent"):
         labels.append(f"Talent: {filters['talent']}")
+    if filters.get("include_champions"):
+        labels.append("Champs: " + ", ".join(filters["include_champions"]))
+    if filters.get("exclude_champions"):
+        labels.append("Not Champs: " + ", ".join(filters["exclude_champions"]))
     if filters.get("result") == "wins":
         labels.append("Wins Only")
     elif filters.get("result") == "losses":
@@ -237,6 +266,10 @@ def title_filter_suffix(filters):
         parts.append(f"on {filters['map']}")
     if filters.get("talent"):
         parts.append(f"with {filters['talent']}")
+    if filters.get("include_champions"):
+        parts.append("on " + "/".join(filters["include_champions"]))
+    if filters.get("exclude_champions"):
+        parts.append("without " + "/".join(filters["exclude_champions"]))
     if filters.get("result") == "wins":
         parts.append("in Wins")
     elif filters.get("result") == "losses":
@@ -516,6 +549,37 @@ async def extract_match_filters(ctx, args):
             filters.setdefault(filter_key, [])
             if resolved_champion not in filters[filter_key]:
                 filters[filter_key].append(resolved_champion)
+            i = consumed_until
+            continue
+
+        if key in {"champ", "champs", "champion", "champions"}:
+            champion_start = i + 1
+            if champion_start >= len(args):
+                return remaining, filters, f"`{arg}` needs at least one champion after it."
+            champions, consumed_until = _parse_champion_list(args, champion_start)
+            if not champions:
+                return remaining, filters, f"Could not find a champion matching `{args[champion_start]}`."
+            filters.setdefault("include_champions", [])
+            for champion in champions:
+                if champion not in filters["include_champions"]:
+                    filters["include_champions"].append(champion)
+            i = consumed_until
+            continue
+
+        if raw_key == "-not" or key in {"notchamp", "notchamps", "exclude", "without"} or (
+            key == "not"
+            and (i + 1 >= len(args) or compact_arg(args[i + 1]) not in {"vs", "versus"})
+        ):
+            champion_start = i + 1
+            if champion_start >= len(args):
+                return remaining, filters, f"`{arg}` needs at least one champion after it."
+            champions, consumed_until = _parse_champion_list(args, champion_start)
+            if not champions:
+                return remaining, filters, f"Could not find a champion matching `{args[champion_start]}`."
+            filters.setdefault("exclude_champions", [])
+            for champion in champions:
+                if champion not in filters["exclude_champions"]:
+                    filters["exclude_champions"].append(champion)
             i = consumed_until
             continue
 
