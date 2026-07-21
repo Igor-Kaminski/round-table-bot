@@ -929,7 +929,7 @@ class Stats(commands.Cog):
                 "`!mates me worst -m 5` - Worst teammates with at least 5 games together.",
                 "`!mates me support season 4` - Teammates while you played Support in Season 4.",
                 "`!mates me nando map jaguar falls` - Teammates while you played Fernando on Jaguar Falls.",
-                "`!mates me best 15 last 30d` - Top 15 recent teammates.",
+                "`!mates me best limit 15 last 30d` - Top 15 recent teammates.",
                 "`!mates me worst against nozy` - Worst teammates in games against Nozy.",
             ],
             "duo": [
@@ -948,14 +948,14 @@ class Stats(commands.Cog):
                 "`!enemies me` - Enemy players you beat most and lose to most.",
                 "`!matchups me` - Same as `!enemies me`.",
                 "`!enemies me worst -m 5` - Enemy players farming you with at least 5 games.",
-                "`!enemies Eagle best 15` - Top 15 enemy players Eagle beats most.",
+                "`!enemies Eagle best limit 15` - Top 15 enemy players Eagle beats most.",
                 "`!enemies me nando season 3` - Enemy matchups while you played Fernando in Season 3.",
                 "`!enemies me map jaguar falls` - Enemy player records on Jaguar Falls.",
             ],
             "withchamps": [
                 "`!withchamps me` - Champion records when those champs are on your team.",
                 "`!againstchamps me` - Champion records when those champs are against you.",
-                "`!champswith me best 15` - Top allied champions with you.",
+                "`!champswith me best limit 15` - Top allied champions with you.",
                 "`!champsagainst me worst -m 5` - Enemy champions you struggle against, min 5 appearances.",
                 "`!withchamps me worst -m 5` - Allied champions with bad records, min 5 appearances.",
                 "`!againstchamps me worst -m 5` - Enemy champions you struggle against, min 5 appearances.",
@@ -964,6 +964,7 @@ class Stats(commands.Cog):
             ],
             "champwith": [
                 "`!champwith fernando` - Allied champion records for Fernando.",
+                "`!champwith grover limit 50` - Bigger list of champions paired with Grover.",
                 "`!champagainst fernando` - Enemy champion matchup records for Fernando.",
                 "`!champwith khan support s4` - Allied support records when Khan is played in Season 4.",
                 "`!champagainst atlas flank -m 5` - Atlas records against flank champions with 5+ games.",
@@ -977,6 +978,7 @@ class Stats(commands.Cog):
                 "`sweep` - 4-0 games, e.g. `!lb wr bk sweep`.",
                 "`wins` - Wins only, e.g. `!stats me damba wins`.",
                 "`losses` - Losses only, e.g. `!lb kp moji losses`.",
+                "`limit <number>` - Row limit for list commands, e.g. `!lb wr support limit 30`, `!mates me limit 15`, `!history me limit 10`.",
                 "`season 4` / `season 3.5` / `season 3` / `season 2` - Season filters, e.g. `!lb wr support season 4`. Season 1 records are unavailable.",
                 "`map <name>` - Map filter, e.g. `!lb wr ying map jaguar falls`.",
                 "`with <player>` - Same team, e.g. `!lb wr barik with pjamo`.",
@@ -1373,7 +1375,7 @@ class Stats(commands.Cog):
             lines.append(f"{index:<3} {name:<14} {row['pickrate']:>6.1f}% {row['winrate']:>6.1f}% {row['games']:>3}")
         return lines
 
-    def _parse_list_options(self, args, default_limit=10):
+    def _parse_list_options(self, args, default_limit=10, max_limit=25):
         mode = "both"
         min_games = 1
         limit = default_limit
@@ -1393,8 +1395,14 @@ class Stats(commands.Cog):
                     i += 1
                 else:
                     remaining.append(args[i])
+            elif arg in {"limit", "lim", "-l"}:
+                if i + 1 < len(args) and str(args[i + 1]).isdigit():
+                    limit = max(1, min(max_limit, int(args[i + 1])))
+                    i += 1
+                else:
+                    remaining.append(args[i])
             elif arg.isdigit() and (i == 0 or str(args[i - 1]).lower() not in {"season", "last", "time"}):
-                limit = max(1, min(25, int(arg)))
+                limit = max(1, min(max_limit, int(arg)))
             else:
                 remaining.append(args[i])
             i += 1
@@ -1572,7 +1580,7 @@ class Stats(commands.Cog):
         aliases=["teammates", "tmates"],
         help=(
             "Show your best and worst teammates by winrate together.\n"
-            "Usage: `!mates [user|ign] [best|worst|both] [-m games] [champion|role] [filters]`\n"
+            "Usage: `!mates [user|ign] [best|worst|both] [limit N] [-m games] [champion|role] [filters]`\n"
             "Examples:\n"
             "- `!mates me`\n"
             "- `!mates Eagle best`\n"
@@ -1611,6 +1619,12 @@ class Stats(commands.Cog):
                     await ctx.send("`-m` needs a number after it, like `!mates me -m 5`.")
                     return
                 min_games = max(1, int(args[i + 1]))
+                i += 1
+            elif arg in {"limit", "lim", "-l"}:
+                if i + 1 >= len(args) or not str(args[i + 1]).isdigit():
+                    await ctx.send("`limit` needs a number after it, like `!mates me limit 15`.")
+                    return
+                limit = max(1, min(20, int(args[i + 1])))
                 i += 1
             elif arg.isdigit() and (i == 0 or str(args[i - 1]).lower() not in {"season", "last", "time"}):
                 limit = max(1, min(20, int(arg)))
@@ -1767,6 +1781,12 @@ class Stats(commands.Cog):
                     return
                 min_games = max(1, int(args[i + 1]))
                 i += 1
+            elif arg in {"limit", "lim", "-l"}:
+                if i + 1 >= len(args) or not str(args[i + 1]).isdigit():
+                    await ctx.send("`limit` needs a number after it, like `!enemies me limit 15`.")
+                    return
+                limit = max(1, min(20, int(args[i + 1])))
+                i += 1
             elif arg.isdigit() and (i == 0 or str(args[i - 1]).lower() not in {"season", "last", "time"}):
                 limit = max(1, min(20, int(arg)))
             else:
@@ -1835,7 +1855,7 @@ class Stats(commands.Cog):
     @commands.command(
         name="enemies",
         aliases=["enemys", "matchups"],
-        help="Show best and worst enemy player matchups. Usage: `!enemies [user|ign] [best|worst|both] [-m games] [champion|role] [filters]`.",
+        help="Show best and worst enemy player matchups. Usage: `!enemies [user|ign] [best|worst|both] [limit N] [-m games] [champion|role] [filters]`.",
     )
     async def enemies_cmd(self, ctx, *args):
         await self._enemy_records_cmd(ctx, *args)
@@ -1930,6 +1950,12 @@ class Stats(commands.Cog):
                     return
                 min_games = max(1, int(args[i + 1]))
                 i += 1
+            elif arg in {"limit", "lim", "-l"}:
+                if i + 1 >= len(args) or not str(args[i + 1]).isdigit():
+                    await ctx.send("`limit` needs a number after it, like `!withchamps me limit 15`.")
+                    return
+                limit = max(1, min(20, int(args[i + 1])))
+                i += 1
             elif arg.isdigit() and (i == 0 or str(args[i - 1]).lower() not in {"season", "last", "time"}):
                 limit = max(1, min(20, int(arg)))
             else:
@@ -1997,7 +2023,7 @@ class Stats(commands.Cog):
     @commands.command(
         name="withchamps",
         aliases=["allychamps", "alliedchamps", "withchars", "allychars", "alliedchars", "champswith", "charswith"],
-        help="Show champion records when those champions are on your team. Usage: `!withchamps [user|ign] [best|worst|both] [-m games] [champion|role] [filters]`.",
+        help="Show champion records when those champions are on your team. Usage: `!withchamps [user|ign] [best|worst|both] [limit N] [-m games] [champion|role] [filters]`.",
     )
     async def withchamps_cmd(self, ctx, *args):
         await self._related_champs_cmd(ctx, "with", *args)
@@ -2005,7 +2031,7 @@ class Stats(commands.Cog):
     @commands.command(
         name="againstchamps",
         aliases=["enemychamps", "againstchars", "enemychars", "champsagainst", "charsagainst"],
-        help="Show champion records when those champions are against you. Usage: `!againstchamps [user|ign] [best|worst|both] [-m games] [champion|role] [filters]`.",
+        help="Show champion records when those champions are against you. Usage: `!againstchamps [user|ign] [best|worst|both] [limit N] [-m games] [champion|role] [filters]`.",
     )
     async def againstchamps_cmd(self, ctx, *args):
         await self._related_champs_cmd(ctx, "against", *args)
@@ -2017,10 +2043,10 @@ class Stats(commands.Cog):
             await ctx.send(filter_error)
             return
 
-        args, _mode, min_games, limit = self._parse_list_options(list(args), default_limit=10)
+        args, _mode, min_games, limit = self._parse_list_options(list(args), default_limit=10, max_limit=60)
         if not args:
             command = "champwith" if relation == "with" else "champagainst"
-            await ctx.send(f"Usage: `!{command} <champion> [-m games] [related champion/role] [filters]`.")
+            await ctx.send(f"Usage: `!{command} <champion> [limit 50] [-m games] [related champion/role] [filters]`.")
             return
 
         champion_name = None
@@ -2081,7 +2107,7 @@ class Stats(commands.Cog):
     @commands.command(
         name="champwith",
         aliases=["champwithchamps"],
-        help="Show allied champion records for a champion. Usage: `!champwith <champion> [-m games] [related champion/role] [filters]`.",
+        help="Show allied champion records for a champion. Usage: `!champwith <champion> [limit 50] [-m games] [related champion/role] [filters]`.",
     )
     async def champion_with_cmd(self, ctx, *args):
         await self._champion_relationship_cmd(ctx, "with", *args)
@@ -2089,7 +2115,7 @@ class Stats(commands.Cog):
     @commands.command(
         name="champagainst",
         aliases=["champagainstchamps"],
-        help="Show enemy champion matchup records for a champion. Usage: `!champagainst <champion> [-m games] [related champion/role] [filters]`.",
+        help="Show enemy champion matchup records for a champion. Usage: `!champagainst <champion> [limit 50] [-m games] [related champion/role] [filters]`.",
     )
     async def champion_against_cmd(self, ctx, *args):
         await self._champion_relationship_cmd(ctx, "against", *args)
@@ -2917,7 +2943,7 @@ Shows champion statistics breakdown for a player.
         name="history",
         help=(
             "Show recent matches for a player (max 20).\n"
-            "Usage: `!history [user|ign] [count] [filters]`\n"
+            "Usage: `!history [user|ign] [count|limit N] [filters]`\n"
             "Examples:\n"
             "- `!history`\n"
             "- `!history 10`\n"
@@ -2937,7 +2963,18 @@ Shows champion statistics breakdown for a player.
         user_input_parts = []
 
         if args:
-            if args[-1].isdigit():
+            args = list(args)
+            for keyword in ("limit", "lim", "-l"):
+                if keyword in [str(arg).lower() for arg in args]:
+                    keyword_index = next(i for i, arg in enumerate(args) if str(arg).lower() == keyword)
+                    if keyword_index + 1 >= len(args) or not str(args[keyword_index + 1]).isdigit():
+                        await ctx.send("`limit` needs a number after it, like `!history me limit 10`.")
+                        return
+                    limit = int(args[keyword_index + 1])
+                    del args[keyword_index:keyword_index + 2]
+                    break
+
+            if args and str(args[-1]).isdigit():
                 limit = int(args[-1])
                 user_input_parts = args[:-1]
             else:
@@ -3538,12 +3575,12 @@ Show one champion's winrate on every map.
     LEADERBOARD_HELP = """
 Shows player rankings, with optional filters for champions or roles.
 
-**Usage:** `!leaderboard [stat] [champion/role] [limit] [-b] [-m <games>] [filters]`
+**Usage:** `!leaderboard [stat] [champion/role] [limit N] [-b] [-m <games>] [filters]`
 
 **Arguments:**
 - `[stat]`: The statistic to rank by. Defaults to `winrate`.
 - `[champion/role]`: Filter by a champion name (e.g., `nando`) or a role (`tank`, `support`, `point tank`, `off tank`).
-- `[limit]`: The number of players to show. Defaults to `20`.
+- `[limit N]`: The number of players to show. Defaults to `20`. Bare numbers still work, e.g. `!lb wr support 30`.
 - `[-b]`: Optional flag to show the bottom of the leaderboard.
 - `[-m <games>]`: Optional flag to set a minimum number of games played to qualify. Defaults to 1 (all players).
 - `[filters]`: time (`last 7d`, `season 4`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
@@ -3655,8 +3692,9 @@ Shows player rankings, with optional filters for champions or roles.
         i = 0
         while i < len(args):
             arg = args[i]
+            lower_arg = arg.lower()
             
-            if arg.lower() == '-m':
+            if lower_arg == '-m':
                 if i + 1 < len(args) and args[i+1].isdigit():
                     min_games = max(1, int(args[i+1]))
                     i += 2
@@ -3664,10 +3702,18 @@ Shows player rankings, with optional filters for champions or roles.
                 i += 1
                 continue
 
-            if arg.lower() == "-b":
+            if lower_arg in {"limit", "lim", "-l"}:
+                if i + 1 < len(args) and args[i + 1].isdigit():
+                    limit = int(args[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                continue
+
+            if lower_arg == "-b":
                 show_bottom = True
-            elif arg.lower() in stat_map:
-                stat_alias = arg.lower()
+            elif lower_arg in stat_map:
+                stat_alias = lower_arg
             elif arg.isdigit():
                 limit = int(arg)
             else:
@@ -3803,7 +3849,7 @@ Shows player rankings, with optional filters for champions or roles.
     MAP_HELP = """
 Shortcut leaderboard for one map.
 
-**Usage:** `!map <map name> [stat] [champion/role] [limit] [-b] [-m <games>] [filters]`
+**Usage:** `!map <map name> [stat] [champion/role] [limit N] [-b] [-m <games>] [filters]`
 
 This is the same as using `!lb ... map <map name>`.
 
@@ -4097,12 +4143,12 @@ This is the same as using `!lb ... map <map name>`.
     CHAMPION_LEADERBOARD_HELP = """
 Shows champion rankings aggregated across all players.
 
-**Usage:** `!champ_lb [stat] [role] [limit] [-b] [-m <games>] [filters]`
+**Usage:** `!champ_lb [stat] [role] [limit N] [-b] [-m <games>] [filters]`
 
 **Arguments:**
 - `[stat]`: The statistic to rank by. Defaults to `winrate`.
 - `[role]`: Filter by a role (`damage`, `flank`, `tank`, `support`, `point tank`, `off tank`).
-- `[limit]`: The number of champions to show. Defaults to `20`.
+- `[limit N]`: The number of champions to show. Defaults to `20`. Bare numbers still work, e.g. `!clb wr support 30`.
 - `[-b]`: Optional flag to show the bottom of the leaderboard.
 - `[-m <games>]`: Optional flag to set a minimum number of games to qualify. Defaults to 1.
 - `[filters]`: time (`last 7d`, `season 4`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
@@ -4212,8 +4258,9 @@ Shows champion rankings aggregated across all players.
         i = 0
         while i < len(args):
             arg = args[i]
+            lower_arg = arg.lower()
             
-            if arg.lower() == '-m':
+            if lower_arg == '-m':
                 if i + 1 < len(args) and args[i+1].isdigit():
                     min_games = max(1, int(args[i+1]))
                     i += 2
@@ -4221,10 +4268,18 @@ Shows champion rankings aggregated across all players.
                 i += 1
                 continue
 
-            if arg.lower() == "-b":
+            if lower_arg in {"limit", "lim", "-l"}:
+                if i + 1 < len(args) and args[i + 1].isdigit():
+                    limit = int(args[i + 1])
+                    i += 2
+                    continue
+                i += 1
+                continue
+
+            if lower_arg == "-b":
                 show_bottom = True
-            elif arg.lower() in stat_map:
-                stat_alias = arg.lower()
+            elif lower_arg in stat_map:
+                stat_alias = lower_arg
             elif arg.isdigit():
                 limit = int(arg)
             else:

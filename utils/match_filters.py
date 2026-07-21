@@ -56,6 +56,7 @@ SEASON_FILTERS = {
 
 FILTER_KEYWORDS = {
     "map", "talent", "tal", "champ", "champs", "champion", "champions",
+    "limit", "lim",
     "withchamp", "withchamps", "ally", "allies", "allychamp", "allychamps",
     "notchamp", "notchamps", "exclude", "without",
     "notwithchamp", "notwithchamps", "notally", "notallies", "noally", "noallies",

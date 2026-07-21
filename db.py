@@ -1779,43 +1779,50 @@ def get_pickrate_records(limit=20, show_bottom=False, min_games=1, role=None, fi
     try:
         where_conditions = ["m.time > 0"]
         params = []
+        role_condition = ""
+        role_params = []
         if role:
             champions_in_role = get_champions_for_role(role)
             if not champions_in_role:
                 return []
             placeholders = ", ".join("?" for _ in champions_in_role)
-            where_conditions.append(f"ps.champ IN ({placeholders})")
-            params.extend(champions_in_role)
+            role_condition = f"WHERE br.champ IN ({placeholders})"
+            role_params.extend(champions_in_role)
 
         _apply_match_filters(where_conditions, params, filters, player_alias="ps")
         where_clause = " AND ".join(where_conditions)
         order = "ASC" if show_bottom else "DESC"
 
         cursor.execute(f"""
-            WITH FilteredRows AS (
-                SELECT ps.champ, ps.team, m.team1_score, m.team2_score
+            WITH BaseRows AS (
+                SELECT ps.champ, ps.match_id, ps.team, m.team1_score, m.team2_score
                 FROM player_stats ps
                 JOIN matches m ON ps.match_id = m.match_id
                 WHERE {where_clause}
             ),
+            FilteredRows AS (
+                SELECT br.*
+                FROM BaseRows br
+                {role_condition}
+            ),
             Totals AS (
-                SELECT COUNT(*) AS total_picks FROM FilteredRows
+                SELECT COUNT(DISTINCT match_id) AS total_matches FROM BaseRows
             )
             SELECT
                 fr.champ,
-                COUNT(*) AS games,
+                COUNT(DISTINCT fr.match_id) AS games,
                 SUM(CASE
                     WHEN (fr.team = 1 AND fr.team1_score > fr.team2_score)
                       OR (fr.team = 2 AND fr.team2_score > fr.team1_score)
                     THEN 1 ELSE 0
                 END) AS wins,
-                (COUNT(*) * 100.0 / NULLIF((SELECT total_picks FROM Totals), 0)) AS pickrate
+                (COUNT(DISTINCT fr.match_id) * 100.0 / NULLIF((SELECT total_matches FROM Totals), 0)) AS pickrate
             FROM FilteredRows fr
             GROUP BY fr.champ
             HAVING games >= ?
             ORDER BY pickrate {order}, games DESC, fr.champ COLLATE NOCASE ASC
             LIMIT ?;
-        """, params + [min_games, limit])
+        """, params + role_params + [min_games, limit])
 
         rows = []
         for row in cursor.fetchall():
