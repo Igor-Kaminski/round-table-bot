@@ -2464,12 +2464,13 @@ class Stats(commands.Cog):
     TOP_HELP = """
 Shows champion statistics breakdown for a player.
 
-**Usage:** `!top [@user] [-stat1] [-stat2] ... [role/champion] [-m <games>] [filters]`
+**Usage:** `!top [@user] [-stat1] [-stat2] ... [role/champion] [limit N] [-m <games>] [filters]`
 
 **Arguments:**
 - `[@user]`: Target player (defaults to yourself)
 - `[-stat]`: Stats to display (e.g., `-kpm -dmg_share -kda`)
 - `[role/champion]`: Filter by role (`damage`, `flank`, `support`, `tank`, `point tank`, `off tank`) or champion name
+- `[limit N]`: Optional row limit. In grouped mode this limits rows per role.
 - `[-m <games>]`: Minimum games filter (default: 1)
 - `[filters]`: time (`last 7d`, `season 4`, `from YYYY-MM-DD to YYYY-MM-DD`), map, result, team, score, with/against player
 
@@ -2505,6 +2506,7 @@ Shows champion statistics breakdown for a player.
 - `!top -kpm -dmg_share` - Shows kills/min and damage share
 - `!top me -dh support` - Shows support damage-healed percentage
 - `!top tank -m 5` - Shows tanks with 5+ games
+- `!top me s4 limit 5` - Shows up to 5 champions per role in Season 4
 - `!top me bk` - Shows your Bomb King stats.
 - `!top me point tank` - Shows your point tanks.
 - `!top me off tank` - Shows your off tanks.
@@ -2528,6 +2530,7 @@ Shows champion statistics breakdown for a player.
         role_filter = None
         champion_filter = None
         min_games = 1
+        row_limit = None
         unprocessed_args = []
         
         # Define stat aliases
@@ -2610,6 +2613,14 @@ Shows champion statistics breakdown for a player.
             
             # Check for stat flags
             lower_arg = arg.lower()
+            if lower_arg in {"limit", "lim", "-l"}:
+                if i + 1 < len(args) and str(args[i + 1]).isdigit():
+                    row_limit = max(1, min(100, int(args[i + 1])))
+                    i += 2
+                    continue
+                await ctx.send("`limit` needs a number after it, like `!top me limit 5`.")
+                return
+
             if lower_arg.startswith('-') or lower_arg in bare_stat_aliases:
                 normalized = stat_aliases.get(lower_arg, bare_stat_aliases.get(lower_arg, lower_arg))
                 if normalized in valid_stats:
@@ -2703,6 +2714,8 @@ Shows champion statistics breakdown for a player.
             filters.append(f"Champion: {champion_filter}")
         if min_games > 1:
             filters.append(f"Min games: {min_games}")
+        if row_limit:
+            filters.append(f"Limit: {row_limit}")
         filters.extend(_filter_summary(match_filters))
         if filters:
             embed.description = f"*Filters: {', '.join(filters)}*"
@@ -2797,7 +2810,8 @@ Shows champion statistics breakdown for a player.
                     lines.append(separator)
                     lines.append(f"# {role}")
                     
-                    for i, champ in enumerate(role_champs[:10], 1):  # Limit to top 10 per role
+                    displayed_champs = role_champs[:row_limit] if row_limit else role_champs
+                    for i, champ in enumerate(displayed_champs, 1):
                         row_parts = [f"{i}. {champ['champ'][:14]:<14}"]
                         for stat in stat_flags:
                             if stat == "kda":
@@ -2814,7 +2828,8 @@ Shows champion statistics breakdown for a player.
             lines.append(header)
             lines.append(separator)
             
-            for i, champ in enumerate(champ_data[:30], 1):  # Limit to top 30
+            displayed_champs = champ_data[:row_limit] if row_limit else champ_data
+            for i, champ in enumerate(displayed_champs, 1):
                 row_parts = [f"{i}. {champ['champ'][:14]:<14}"]
                 for stat in stat_flags:
                     if stat == "kda":
@@ -2828,6 +2843,50 @@ Shows champion statistics breakdown for a player.
         
         top_table_min_width = max(len(header) + 14, 72)
         lines = [f"{line.ljust(top_table_min_width)}|" if line else line for line in lines]
+
+        footer_parts = []
+        if stat_flags != ['winrate', 'kda_ratio', 'games', 'time_played']:
+            footer_parts.append(f"Stats shown: {', '.join(stat_display_names.get(s, s) for s in stat_flags)}")
+        footer_parts.append(f"Use !help top for more options")
+        footer_text = " â€¢ ".join(footer_parts)
+
+        chunks = []
+        current_chunk = []
+        current_length = 0
+        for line in lines:
+            line_length = len(line) + 1
+            if current_chunk and current_length + line_length + 8 > 1000:
+                chunks.append("```\n" + "\n".join(current_chunk) + "\n```")
+                current_chunk = [line]
+                current_length = line_length
+            else:
+                current_chunk.append(line)
+                current_length += line_length
+        if current_chunk:
+            chunks.append("```\n" + "\n".join(current_chunk) + "\n```")
+
+        embeds = [embed]
+        embed_chars = len(embed.title or "") + len(embed.description or "") + len(footer_text)
+        field_count = 0
+        for i, chunk in enumerate(chunks):
+            if field_count >= 5 or embed_chars + len(chunk) + 30 > 5500:
+                next_embed = discord.Embed(
+                    title=f"Champion Stats for {target_user.display_name} cont.",
+                    color=discord.Color.blue()
+                )
+                embeds.append(next_embed)
+                embed_chars = len(next_embed.title or "") + len(footer_text)
+                field_count = 0
+
+            field_name = "Statistics" if i == 0 else "Statistics cont."
+            embeds[-1].add_field(name=field_name, value=chunk, inline=False)
+            embed_chars += len(field_name) + len(chunk)
+            field_count += 1
+
+        for page in embeds:
+            page.set_footer(text=footer_text)
+            await ctx.send(embed=page)
+        return
         
         # Add to embed
         result_text = "```\n" + "\n".join(lines) + "\n```"
