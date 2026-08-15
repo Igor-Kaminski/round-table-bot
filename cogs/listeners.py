@@ -121,6 +121,26 @@ class Listeners(commands.Cog):
         self.bot = bot
         self.reader = None
         self.ocr_lock = asyncio.Lock()
+        self.ocr_warmup_task = None
+
+    async def cog_load(self):
+        # Load the models once in the background so the first real screenshot
+        # does not pay the 20-second initialization cost.
+        self.ocr_warmup_task = asyncio.create_task(self.warm_up_ocr())
+
+    async def warm_up_ocr(self):
+        try:
+            async with self.ocr_lock:
+                await asyncio.to_thread(self.get_ocr_reader)
+            print("EasyOCR models loaded and ready.")
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            print(f"EasyOCR warmup failed; the next screenshot will retry: {e}")
+
+    def cog_unload(self):
+        if self.ocr_warmup_task and not self.ocr_warmup_task.done():
+            self.ocr_warmup_task.cancel()
 
     async def find_match_data_command_timestamp(self, channel, match_id, before_message):
         async for message in channel.history(limit=100, before=before_message):
@@ -222,10 +242,9 @@ class Listeners(commands.Cog):
                     queue_number = queue_number_match.group(1)
                     insert_embed(queue_number, embed.to_dict())
 
-    def get_match_id(self, img):
-        # --- (HELPER) OCR IMAGE PROCESSING ---
+    def get_ocr_reader(self):
         # EasyOCR imports PyTorch, so keep it lazy to avoid spending hundreds of
-        # megabytes before the bot actually receives a scoreboard screenshot.
+        # megabytes until the background warmup begins after Discord connects.
         os.environ.setdefault("OMP_NUM_THREADS", "1")
         os.environ.setdefault("MKL_NUM_THREADS", "1")
 
@@ -251,6 +270,14 @@ class Listeners(commands.Cog):
                 verbose=False,
             )
 
+        return self.reader
+
+    def get_match_id(self, img):
+        # --- (HELPER) OCR IMAGE PROCESSING ---
+        import cv2
+
+        reader = self.get_ocr_reader()
+
         image = cv2.imread(img)
         if image is None:
             raise ValueError("Could not read the screenshot image.")
@@ -275,7 +302,7 @@ class Listeners(commands.Cog):
             )
 
         # Read and store text from the image
-        results = self.reader.readtext(
+        results = reader.readtext(
             header,
             decoder="greedy",
             batch_size=1,
