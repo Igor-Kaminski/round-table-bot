@@ -1,5 +1,6 @@
 # cogs/listeners.py
 
+import asyncio
 import discord
 from discord.ext import commands
 import re
@@ -14,7 +15,6 @@ from db import (
     get_match_screenshot,
     link_match_screenshot,
 )
-import easyocr
 import tempfile
 import os
 from utils.match_screenshots import (
@@ -27,6 +27,7 @@ from utils.match_screenshots import (
 )
 
 MATCH_DATA_COMMAND_RE = re.compile(r">>\s*match_data\s+(\d{9,12})", re.IGNORECASE)
+OCR_MATCH_ID_RE = re.compile(r"\bID\s*[:#-]?\s*(\d{9,12})\b", re.IGNORECASE)
 
 
 def parse_match_textbox(text):
@@ -119,6 +120,7 @@ class Listeners(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
         self.reader = None
+        self.ocr_lock = asyncio.Lock()
 
     async def find_match_data_command_timestamp(self, channel, match_id, before_message):
         async for message in channel.history(limit=100, before=before_message):
@@ -222,20 +224,71 @@ class Listeners(commands.Cog):
 
     def get_match_id(self, img):
         # --- (HELPER) OCR IMAGE PROCESSING ---
+        # EasyOCR imports PyTorch, so keep it lazy to avoid spending hundreds of
+        # megabytes before the bot actually receives a scoreboard screenshot.
+        os.environ.setdefault("OMP_NUM_THREADS", "1")
+        os.environ.setdefault("MKL_NUM_THREADS", "1")
+
+        import cv2
+        import easyocr
+        import torch
+
         if self.reader is None:
-            self.reader = easyocr.Reader(['en'])
+            torch.set_num_threads(1)
+            try:
+                torch.set_num_interop_threads(1)
+            except RuntimeError:
+                pass
+
+            if hasattr(torch.backends, "nnpack") and hasattr(torch.backends.nnpack, "set_flags"):
+                torch.backends.nnpack.set_flags(False)
+            cv2.setNumThreads(1)
+
+            self.reader = easyocr.Reader(
+                ["en"],
+                gpu=False,
+                quantize=True,
+                verbose=False,
+            )
+
+        image = cv2.imread(img)
+        if image is None:
+            raise ValueError("Could not read the screenshot image.")
+
+        # The Paladins match ID is in the upper scoreboard header. Processing
+        # only that region avoids running the detector over a full 1080p/4K
+        # screenshot, which is both much faster and significantly lighter on RAM.
+        height, width = image.shape[:2]
+        header_height = min(height, max(120, int(height * 0.24)))
+        header_width = min(width, max(640, int(width * 0.72)))
+        header = image[:header_height, :header_width]
+
+        max_header_width = 1600
+        if header.shape[1] > max_header_width:
+            scale = max_header_width / header.shape[1]
+            header = cv2.resize(
+                header,
+                None,
+                fx=scale,
+                fy=scale,
+                interpolation=cv2.INTER_AREA,
+            )
 
         # Read and store text from the image
-        results = self.reader.readtext(img)
-        for _, text, prob in results:
-
-            # Search for the match id ('ID ' and ten digits)
-            found_id = re.search(r'ID\s\d{10}', text)
+        results = self.reader.readtext(
+            header,
+            decoder="greedy",
+            batch_size=1,
+            workers=0,
+            paragraph=False,
+            canvas_size=1600,
+            mag_ratio=1.0,
+        )
+        texts = [text for _, text, _ in results]
+        for candidate in [*texts, " ".join(texts)]:
+            found_id = OCR_MATCH_ID_RE.search(candidate)
             if found_id:
-
-                # Return the match id or None if not found
-                match_id = int(text[3:13])
-                return match_id
+                return int(found_id.group(1))
 
         return None
 
@@ -262,7 +315,11 @@ class Listeners(commands.Cog):
                         await attachment.save(img_path)
 
                         # Attempt to extract the match id from the image
-                        match_id = self.get_match_id(img_path)
+                        # EasyOCR is CPU-bound and synchronous. Keep it off the
+                        # Discord event loop so gateway heartbeats remain healthy,
+                        # and serialize jobs to cap peak memory usage.
+                        async with self.ocr_lock:
+                            match_id = await asyncio.to_thread(self.get_match_id, img_path)
 
                         # Send the match id in the chat if it was successfully extracted
                         if match_id:
