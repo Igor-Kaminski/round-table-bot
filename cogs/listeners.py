@@ -28,6 +28,7 @@ from utils.match_screenshots import (
 
 MATCH_DATA_COMMAND_RE = re.compile(r">>\s*match_data\s+(\d{9,12})", re.IGNORECASE)
 OCR_MATCH_ID_RE = re.compile(r"\bID\s*[:#-]?\s*(\d{9,12})\b", re.IGNORECASE)
+OCR_STANDALONE_MATCH_ID_RE = re.compile(r"(?<!\d)(\d{9,12})(?!\d)")
 
 
 def parse_match_textbox(text):
@@ -282,38 +283,83 @@ class Listeners(commands.Cog):
         if image is None:
             raise ValueError("Could not read the screenshot image.")
 
-        # The Paladins match ID is in the upper scoreboard header. Processing
-        # only that region avoids running the detector over a full 1080p/4K
-        # screenshot, which is both much faster and significantly lighter on RAM.
         height, width = image.shape[:2]
+
+        # Cropped ID attachments do not include the literal "ID" label. Only
+        # allow a standalone number when the image itself is a small crop so a
+        # scoreboard stat cannot be mistaken for the match ID.
+        if width <= 1200 and height <= 300:
+            small_image = image
+            scale = max(1.0, min(4.0, 600 / width))
+            if scale > 1.0:
+                small_image = cv2.resize(
+                    small_image,
+                    None,
+                    fx=scale,
+                    fy=scale,
+                    interpolation=cv2.INTER_CUBIC,
+                )
+
+            texts = self._read_ocr_text(reader, small_image, canvas_size=900)
+            match_id = self._find_ocr_match_id(texts, allow_standalone=True)
+            if match_id is not None:
+                return match_id
+
+        # The ID is always in the top-left scoreboard header. This tight first
+        # pass is substantially faster than scanning player rows and stats.
+        fast_header = image[:max(1, int(height * 0.14)), :max(1, int(width * 0.45))]
+        fast_header = self._resize_ocr_image(fast_header, 900, cv2)
+        texts = self._read_ocr_text(reader, fast_header, canvas_size=900)
+        match_id = self._find_ocr_match_id(texts)
+        if match_id is not None:
+            return match_id
+
+        # Keep the previous wider crop as a fallback for unusual resolutions,
+        # UI scaling, or screenshots with extra borders around the game.
         header_height = min(height, max(120, int(height * 0.24)))
         header_width = min(width, max(640, int(width * 0.72)))
         header = image[:header_height, :header_width]
+        header = self._resize_ocr_image(header, 1600, cv2)
+        texts = self._read_ocr_text(reader, header, canvas_size=1600)
+        return self._find_ocr_match_id(texts)
 
-        max_header_width = 1600
-        if header.shape[1] > max_header_width:
-            scale = max_header_width / header.shape[1]
-            header = cv2.resize(
-                header,
-                None,
-                fx=scale,
-                fy=scale,
-                interpolation=cv2.INTER_AREA,
-            )
+    @staticmethod
+    def _resize_ocr_image(image, max_width, cv2):
+        if image.shape[1] <= max_width:
+            return image
 
-        # Read and store text from the image
-        results = reader.readtext(
-            header,
+        scale = max_width / image.shape[1]
+        return cv2.resize(
+            image,
+            None,
+            fx=scale,
+            fy=scale,
+            interpolation=cv2.INTER_AREA,
+        )
+
+    @staticmethod
+    def _read_ocr_text(reader, image, canvas_size):
+        return reader.readtext(
+            image,
             decoder="greedy",
             batch_size=1,
             workers=0,
             paragraph=False,
-            canvas_size=1600,
+            canvas_size=canvas_size,
             mag_ratio=1.0,
+            detail=0,
         )
-        texts = [text for _, text, _ in results]
+
+    @staticmethod
+    def _find_ocr_match_id(texts, allow_standalone=False):
         for candidate in [*texts, " ".join(texts)]:
             found_id = OCR_MATCH_ID_RE.search(candidate)
+            if found_id:
+                return int(found_id.group(1))
+
+        if allow_standalone:
+            compact_text = "".join(texts).replace(" ", "")
+            found_id = OCR_STANDALONE_MATCH_ID_RE.fullmatch(compact_text)
             if found_id:
                 return int(found_id.group(1))
 
