@@ -27,8 +27,9 @@ from utils.match_screenshots import (
 )
 
 MATCH_DATA_COMMAND_RE = re.compile(r">>\s*match_data\s+(\d{9,12})", re.IGNORECASE)
-OCR_MATCH_ID_RE = re.compile(r"\bID\s*[:#-]?\s*(\d{9,12})\b", re.IGNORECASE)
+OCR_MATCH_ID_RE = re.compile(r"\bID\s*[:#-]?\s*(\d{9,12})(?!\d)", re.IGNORECASE)
 OCR_STANDALONE_MATCH_ID_RE = re.compile(r"(?<!\d)(\d{9,12})(?!\d)")
+OCR_TEXT_ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:/().- "
 
 
 def parse_match_textbox(text):
@@ -267,6 +268,8 @@ class Listeners(commands.Cog):
             self.reader = easyocr.Reader(
                 ["en"],
                 gpu=False,
+                detector=False,
+                recognizer=True,
                 quantize=True,
                 verbose=False,
             )
@@ -279,7 +282,7 @@ class Listeners(commands.Cog):
 
         reader = self.get_ocr_reader()
 
-        image = cv2.imread(img)
+        image = cv2.imread(img, cv2.IMREAD_GRAYSCALE)
         if image is None:
             raise ValueError("Could not read the screenshot image.")
 
@@ -289,81 +292,76 @@ class Listeners(commands.Cog):
         # allow a standalone number when the image itself is a small crop so a
         # scoreboard stat cannot be mistaken for the match ID.
         if width <= 1200 and height <= 300:
-            small_image = image
-            scale = max(1.0, min(4.0, 600 / width))
-            if scale > 1.0:
-                small_image = cv2.resize(
-                    small_image,
-                    None,
-                    fx=scale,
-                    fy=scale,
-                    interpolation=cv2.INTER_CUBIC,
-                )
-
-            texts = self._read_ocr_text(reader, small_image, canvas_size=900)
-            match_id = self._find_ocr_match_id(texts, allow_standalone=True)
+            texts = reader.recognize(
+                image,
+                decoder="greedy",
+                batch_size=1,
+                workers=0,
+                detail=0,
+                allowlist="0123456789",
+            )
+            compact_text = "".join(texts).replace(" ", "")
+            found_id = OCR_STANDALONE_MATCH_ID_RE.fullmatch(compact_text)
+            match_id = int(found_id.group(1)) if found_id else None
             if match_id is not None:
                 return match_id
 
-        # The ID is always in the top-left scoreboard header. This tight first
-        # pass is substantially faster than scanning player rows and stats.
-        fast_header = image[:max(1, int(height * 0.14)), :max(1, int(width * 0.45))]
-        fast_header = self._resize_ocr_image(fast_header, 900, cv2)
-        texts = self._read_ocr_text(reader, fast_header, canvas_size=900)
-        match_id = self._find_ocr_match_id(texts)
+        # Recognition-only OCR avoids loading EasyOCR's large text detector.
+        # The match metadata occupies one of these overlapping header strips.
+        results = self._recognize_match_id_strips(
+            reader,
+            image,
+            (0.045, 0.06, 0.075, 0.09, 0.105, 0.12, 0.135, 0.15),
+        )
+        match_id = self._find_best_ocr_match_id(results)
         if match_id is not None:
             return match_id
 
-        # Keep the previous wider crop as a fallback for unusual resolutions,
-        # UI scaling, or screenshots with extra borders around the game.
-        header_height = min(height, max(120, int(height * 0.24)))
-        header_width = min(width, max(640, int(width * 0.72)))
-        header = image[:header_height, :header_width]
-        header = self._resize_ocr_image(header, 1600, cv2)
-        texts = self._read_ocr_text(reader, header, canvas_size=1600)
-        return self._find_ocr_match_id(texts)
+        # Some screenshots are cropped through the top of the Victory heading,
+        # moving the metadata line above the normal range.
+        results = self._recognize_match_id_strips(reader, image, (0.015, 0.03))
+        return self._find_best_ocr_match_id(results)
 
     @staticmethod
-    def _resize_ocr_image(image, max_width, cv2):
-        if image.shape[1] <= max_width:
-            return image
+    def _recognize_match_id_strips(reader, image, height_ratios):
+        height, width = image.shape[:2]
+        x_start = int(width * 0.12)
+        x_end = int(width * 0.45)
+        half_height = max(14, int(height * 0.0175))
+        boxes = []
+        for ratio in height_ratios:
+            center = int(height * ratio)
+            boxes.append(
+                [
+                    x_start,
+                    x_end,
+                    max(0, center - half_height),
+                    min(height, center + half_height),
+                ]
+            )
 
-        scale = max_width / image.shape[1]
-        return cv2.resize(
+        return reader.recognize(
             image,
-            None,
-            fx=scale,
-            fy=scale,
-            interpolation=cv2.INTER_AREA,
-        )
-
-    @staticmethod
-    def _read_ocr_text(reader, image, canvas_size):
-        return reader.readtext(
-            image,
+            horizontal_list=boxes,
+            free_list=[],
             decoder="greedy",
             batch_size=1,
             workers=0,
-            paragraph=False,
-            canvas_size=canvas_size,
-            mag_ratio=1.0,
-            detail=0,
+            detail=1,
+            allowlist=OCR_TEXT_ALLOWLIST,
         )
 
     @staticmethod
-    def _find_ocr_match_id(texts, allow_standalone=False):
-        for candidate in [*texts, " ".join(texts)]:
-            found_id = OCR_MATCH_ID_RE.search(candidate)
-            if found_id:
-                return int(found_id.group(1))
+    def _find_best_ocr_match_id(results):
+        candidates = []
+        for _, text, confidence in results:
+            for found_id in OCR_MATCH_ID_RE.finditer(text):
+                candidates.append((confidence, int(found_id.group(1))))
 
-        if allow_standalone:
-            compact_text = "".join(texts).replace(" ", "")
-            found_id = OCR_STANDALONE_MATCH_ID_RE.fullmatch(compact_text)
-            if found_id:
-                return int(found_id.group(1))
+        if not candidates:
+            return None
 
-        return None
+        return max(candidates, key=lambda candidate: candidate[0])[1]
 
     async def match_results_id_ocr(self, message):
         # --- AUTOMATED MATCH ID PROCESSING ---
