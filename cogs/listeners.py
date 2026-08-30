@@ -1,11 +1,10 @@
 # cogs/listeners.py
 
 import asyncio
+import ast
 import discord
 from discord.ext import commands
 import re
-import csv
-import io
 from core.constants import ALLOWED_CHANNELS
 from db import (
     match_exists,
@@ -30,6 +29,13 @@ MATCH_DATA_COMMAND_RE = re.compile(r">>\s*match_data\s+(\d{9,12})", re.IGNORECAS
 OCR_MATCH_ID_RE = re.compile(r"\bID\s*[:#-]?\s*(\d{9,12})(?!\d)", re.IGNORECASE)
 OCR_STANDALONE_MATCH_ID_RE = re.compile(r"(?<!\d)(\d{9,12})(?!\d)")
 OCR_TEXT_ALLOWLIST = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789:/().- "
+
+
+def _parse_optional_int(value):
+    cleaned = str(value).strip()
+    if cleaned.lower() in {"null", "none"}:
+        return None
+    return int(cleaned.replace(",", ""))
 
 
 def parse_match_textbox(text):
@@ -75,9 +81,9 @@ def parse_match_textbox(text):
             raise ValueError(f"Malformed player line: Missing brackets. Line: ```{line}```")
         
         try:
-            csv_content = line.strip("[]")
-            reader = csv.reader(io.StringIO(csv_content), skipinitialspace=True, quotechar="'")
-            parts = next(reader)
+            parts = ast.literal_eval(line)
+            if not isinstance(parts, (list, tuple)):
+                raise ValueError("Player data must be a list.")
             
             if len(parts) != 12:
                 print(f"--- [ERROR] Incorrect field count. Expected 12, got {len(parts)}.")
@@ -92,9 +98,9 @@ def parse_match_textbox(text):
                 "name": parts[0], "champ": parts[1], "talent": parts[2],
                 "credits": int(parts[3].replace(",", "")), "kills": int(kda_parts[0]),
                 "deaths": int(kda_parts[1]), "assists": int(kda_parts[2]),
-                "damage": int(parts[5].replace(",", "")), "taken": int(parts[6].replace(",", "")),
+                "damage": int(parts[5].replace(",", "")), "taken": _parse_optional_int(parts[6]),
                 "obj_time": int(parts[7]), "shielding": int(parts[8].replace(",", "")),
-                "healing": int(parts[9].replace(",", "")), "self_healing": int(parts[10].replace(",", "")),
+                "healing": int(parts[9].replace(",", "")), "self_healing": _parse_optional_int(parts[10]),
                 "team": current_team
             }
             players.append(player)
