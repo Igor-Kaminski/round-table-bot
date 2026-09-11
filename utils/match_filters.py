@@ -50,8 +50,12 @@ SEASON_FILTERS = {
     },
     "4": {
         "after": "2026-06-12",
+        "before": "2026-08-29",
         "label": "Season 4",
     },
+     "4.5": {
+        "after": "2026-08-29",
+        "label": "Season 4.5",
 }
 
 FILTER_KEYWORDS = {
